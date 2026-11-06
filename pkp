@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Atajo de la CLI del kit: ./pkp info
+exec python "$(dirname "$0")/pkp.py" "$@"

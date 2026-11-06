@@ -1,0 +1,32 @@
+{
+  "mod_format": 1,
+  "name": "ejemplo-editar-fila",
+  "version": "0.1.0",
+  "authors": [
+    "worker (tarjeta t_df136634)"
+  ],
+  "description": "Ejemplo minimo: cambia un u16 de una fila de #983. Se expresa por id y offset, sin contenido del juego.",
+  "game": {
+    "title": "pokopia",
+    "version": "2.0.1a",
+    "container_md5": {
+      "LD_C0_R.BIN": "358a672d506ce2b0399149ede64a6760",
+      "LI_C0_R.IDX": "7e056a097f28a62f002ad961a611edf8"
+    }
+  },
+  "requires": [],
+  "edits": [
+    {
+      "table": 983,
+      "row": 1324,
+      "offset": 34,
+      "type": "u16",
+      "expect": "2278",
+      "value": "2279",
+      "why": "nameIndex: u16 en +34; el id de texto es nameIndex + 3 (docs/SPEC-NAMES.md 6.3)",
+      "confidence": "verified"
+    }
+  ],
+  "text": [],
+  "files": []
+}

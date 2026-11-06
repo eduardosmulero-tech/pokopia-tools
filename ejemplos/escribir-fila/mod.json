@@ -1,0 +1,142 @@
+{
+  "mod_format": 1,
+  "name": "ejemplo-escribir-fila",
+  "version": "0.1.0",
+  "authors": [
+    "worker (tarjeta t_df136634)"
+  ],
+  "description": "Ejemplo: escribe una fila nueva clonando el contenido de otra fila, campo a campo por offset. Los campos no tienen esquema demostrado: van como confidence=guess.",
+  "game": {
+    "title": "pokopia",
+    "version": "2.0.1a",
+    "container_md5": {
+      "LD_C0_R.BIN": "358a672d506ce2b0399149ede64a6760",
+      "LI_C0_R.IDX": "7e056a097f28a62f002ad961a611edf8"
+    }
+  },
+  "requires": [],
+  "edits": [
+    {
+      "table": 983,
+      "row": 0,
+      "offset": 8,
+      "type": "u32",
+      "expect": "0",
+      "value": "10",
+      "why": "u32 en +8 del registro; campo sin esquema demostrado (clon de la fila 4599)",
+      "confidence": "guess"
+    },
+    {
+      "table": 983,
+      "row": 0,
+      "offset": 12,
+      "type": "u32",
+      "expect": "0",
+      "value": "1999",
+      "why": "u32 en +12 del registro; campo sin esquema demostrado (clon de la fila 4599)",
+      "confidence": "guess"
+    },
+    {
+      "table": 983,
+      "row": 0,
+      "offset": 16,
+      "type": "u32",
+      "expect": "0",
+      "value": "7999",
+      "why": "u32 en +16 del registro; campo sin esquema demostrado (clon de la fila 4599)",
+      "confidence": "guess"
+    },
+    {
+      "table": 983,
+      "row": 0,
+      "offset": 20,
+      "type": "u32",
+      "expect": "0",
+      "value": "18",
+      "why": "u32 en +20 del registro; campo sin esquema demostrado (clon de la fila 4599)",
+      "confidence": "guess"
+    },
+    {
+      "table": 983,
+      "row": 0,
+      "offset": 24,
+      "type": "u32",
+      "expect": "0",
+      "value": "847380480",
+      "why": "u32 en +24 del registro; campo sin esquema demostrado (clon de la fila 4599)",
+      "confidence": "guess"
+    },
+    {
+      "table": 983,
+      "row": 0,
+      "offset": 28,
+      "type": "u32",
+      "expect": "0",
+      "value": "65577",
+      "why": "u32 en +28 del registro; campo sin esquema demostrado (clon de la fila 4599)",
+      "confidence": "guess"
+    },
+    {
+      "table": 983,
+      "row": 0,
+      "offset": 32,
+      "type": "u32",
+      "expect": "9999",
+      "value": "47583136",
+      "why": "u32 en +32 del registro; campo sin esquema demostrado (clon de la fila 4599)",
+      "confidence": "guess"
+    },
+    {
+      "table": 983,
+      "row": 0,
+      "offset": 36,
+      "type": "u32",
+      "expect": "0",
+      "value": "720896",
+      "why": "u32 en +36 del registro; campo sin esquema demostrado (clon de la fila 4599)",
+      "confidence": "guess"
+    },
+    {
+      "table": 983,
+      "row": 0,
+      "offset": 40,
+      "type": "u32",
+      "expect": "0",
+      "value": "589824",
+      "why": "u32 en +40 del registro; campo sin esquema demostrado (clon de la fila 4599)",
+      "confidence": "guess"
+    },
+    {
+      "table": 983,
+      "row": 0,
+      "offset": 48,
+      "type": "u32",
+      "expect": "0",
+      "value": "65536",
+      "why": "u32 en +48 del registro; campo sin esquema demostrado (clon de la fila 4599)",
+      "confidence": "guess"
+    },
+    {
+      "table": 983,
+      "row": 0,
+      "offset": 56,
+      "type": "u32",
+      "expect": "0",
+      "value": "131072",
+      "why": "u32 en +56 del registro; campo sin esquema demostrado (clon de la fila 4599)",
+      "confidence": "guess"
+    },
+    {
+      "table": 983,
+      "row": 0,
+      "offset": 64,
+      "type": "u32",
+      "expect": "0",
+      "value": "8192",
+      "why": "u32 en +64 del registro; campo sin esquema demostrado (clon de la fila 4599)",
+      "confidence": "guess"
+    }
+  ],
+  "text": [],
+  "files": []
+}

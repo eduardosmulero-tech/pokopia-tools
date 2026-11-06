@@ -1,0 +1,31 @@
+{
+  "mod_format": 1,
+  "name": "ejemplo-editar-texto",
+  "version": "0.1.0",
+  "authors": [
+    "worker (tarjeta t_df136634)"
+  ],
+  "description": "Ejemplo: escribe un texto en un slot vacio de una tabla de textos. El valor es un marcador, no contenido del juego.",
+  "game": {
+    "title": "pokopia",
+    "version": "2.0.1a",
+    "container_md5": {
+      "LD_C0_R.BIN": "358a672d506ce2b0399149ede64a6760",
+      "LI_C0_R.IDX": "7e056a097f28a62f002ad961a611edf8"
+    }
+  },
+  "requires": [],
+  "edits": [],
+  "text": [
+    {
+      "table": 4650,
+      "id": 131,
+      "slot": 0,
+      "expect": "",
+      "value": "MOD-TEXT-1",
+      "why": "slot 0 (singular) del bloque 6*(id-4); este id tiene el bloque vacio en este build (medido)",
+      "confidence": "verified"
+    }
+  ],
+  "files": []
+}

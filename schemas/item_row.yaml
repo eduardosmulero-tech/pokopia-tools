@@ -1,0 +1,575 @@
+# Definicion declarativa de la fila de item de 68 B — entrada #983 del contenedor KTGL.
+#
+# Fuente de las cifras: tools/spec/measure_item_row.py  (salida literal en
+# informes/t_08c3f16a/medicion.txt).  Ningun nombre de contenido del juego: los campos
+# se nombran por posicion y comportamiento, no por lo que el juego llama.
+#
+# Reglas de este fichero:
+#   - `fields` debe cubrir la fila entera sin huecos ni solapes (lo comprueba el cargador).
+#   - Cada campo declara `confidence`: measured | inferred | unknown, y su `evidence`.
+#   - Anadir un campo = editar este YAML.  No hace falta tocar Python.
+#   - Para un campo nuevo: offset, length, type y, si aplica, min/max/values/must_be_zero.
+#
+# Nota de lectura: la fila es una mezcla de u16 y u8; no es uniforme.  Donde el valor
+# maximo medido pasa de 255 el ancho u16 es forzoso (un u8 no lo representaria), y eso
+# queda anotado en `width_forcing`.
+
+schema_version: 1
+
+table:
+  entry: 983
+  label: item_row
+  header_bytes: 64
+  row_bytes: 68
+  rows_expected: 4600
+  evidence: "tools/spec/measure_item_row.py §1: 312864 B = 64 + 4600*68, count 4600, version 3"
+  header:
+    - {offset: 0, type: u32, length: 4, name: count, expected: 4600,
+       evidence: "measure §1; cabecera no nula solo en count y version"}
+    - {offset: 4, type: u32, length: 4, name: version, expected: 3,
+       evidence: "measure §1"}
+    - {offset: 8, type: reserved, length: 56, name: header_padding, must_be_zero: true,
+       evidence: "measure §1: bytes 8..63 todos cero en esta build"}
+
+# Predicado de fila vacia.  Se comprueba en los dos sentidos:
+#   (contenido vacio)  <=>  (key_flag == value)
+# Contenido vacio = `zero_ranges` a cero y el centinela en su sitio.  El byte de clase
+# (+42) queda FUERA de `zero_ranges` a proposito: asi su valor es un dato independiente
+# y la equivalencia es una prueba real, no una tautologia.
+empty_row:
+  zero_ranges:
+    - [0, 32]
+    - [34, 42]
+    - [43, 68]
+  sentinel: {offset: 32, length: 2, value: 9999}
+  key_flag: {offset: 42, length: 1, value: 0}
+  measured:
+    rows_empty: 769
+    marker_9999_rows: 1022
+    equivalence: "las 769 filas con +42 == 0 son exactamente las 769 vacias por contenido"
+    evidence: "measure §2"
+
+fields:
+  - offset: 0
+    length: 8
+    type: reserved
+    name: reserved_00
+    role: reservado
+    confidence: measured
+    must_be_zero: true
+    evidence: "measure §3: 1 valor distinto (0) en las 4600 filas; semantica desconocida"
+
+  - offset: 8
+    length: 2
+    type: u16
+    name: value_tier
+    role: valor economico (candidato)
+    confidence: inferred
+    min: 0
+    max: 2000
+    values: [0, 1, 10, 20, 25, 30, 50, 100, 200, 300, 400, 500, 1000, 2000]
+    width_forcing: "max 2000 > 255 -> u16"
+    evidence: >-
+      measure §3: 14 valores distintos, todos escalones decimales redondos
+      (1, 10, 20, 25, 30, 50, 100, 200, 300, 400, 500, 1000, 2000); 3705 filas no nulas.
+      Es el unico campo de la fila con esa forma de escala comercial.  No hay prueba en
+      juego: la prueba de un byte del informe apunta a este campo como alternativa.
+
+  - offset: 10
+    length: 2
+    type: reserved
+    name: reserved_10
+    role: reservado
+    confidence: measured
+    must_be_zero: true
+    evidence: "measure §3: 1 valor distinto (0)"
+
+  - offset: 12
+    length: 2
+    type: u16
+    name: ref_a
+    role: indice de fila de #41 (variaciones)
+    confidence: measured
+    min: 0
+    max: 3351
+    reference: {limit: 4096, table_candidate: 41}
+    width_forcing: "max 3351 > 255 -> u16"
+    evidence: >-
+      measure §6 y §7 + docs/CAMPO-ASPECTO.md (t_c5cbab15): 1826 valores distintos, 3035
+      filas no nulas, max 3351 < 4096; 2141 de 3830 pares consecutivos suben +1.
+      89,3 % de sus valores caen en fila poblada de #41 (base 47,9 %) y el barrido circular
+      de 64 desplazos tiene su maximo en k=0. Prueba directa: 19 grupos de filas de #983
+      identicas salvo este campo; sus valores ocupan bloques exactos de #41 (412..427
+      pobladas, 411 y 428..438 vacias) y #41 es la unica de las cuatro tablas de 4096 filas
+      que devuelve una fila distinta por cada ficha de una familia. El 10,7 % restante cae
+      en 78 rachas que coinciden con huecos de #41.
+
+  - offset: 14
+    length: 2
+    type: reserved
+    name: reserved_14
+    role: reservado
+    confidence: measured
+    must_be_zero: true
+    evidence: "measure §3: 1 valor distinto (0); descarta leer +12 como u32 con valor alto"
+
+  - offset: 16
+    length: 2
+    type: u16
+    name: key_16
+    role: constante de serie
+    confidence: unknown
+    min: 0
+    max: 9999
+    evidence: >-
+      measure §3: 2032 valores distintos, 0..9999, 770 ceros.  Constante en bloques
+      largos (8400 / 7999 / 13 / 51 / 9900 en series completas).  Max 9999 > 4600:
+      descartado como indice a #983, #40, #41, #44.
+
+  - offset: 18
+    length: 2
+    type: u16
+    name: key_18
+    role: constante de serie
+    confidence: unknown
+    min: 0
+    max: 2561
+    evidence: >-
+      measure §3: 29 valores distintos, 135 filas no nulas, racha constante de hasta 1727
+      filas: es una clave de serie, no identidad de fila.
+
+  - offset: 20
+    length: 2
+    type: u16
+    name: key_20
+    role: enumeracion grande
+    confidence: unknown
+    min: 0
+    max: 299
+    evidence: >-
+      measure §3: 206 valores distintos, 0..299.  Max 299 > 255 descarta indice a #42
+      (256 filas); 299 < 4096 pero el barrido no muestra alineacion con #41 ni #44.
+
+  - offset: 22
+    length: 2
+    type: u16
+    name: ref_e
+    role: indice candidato (4096)
+    confidence: unknown
+    min: 0
+    max: 3820
+    reference: {limit: 4096, table_candidate: 44}
+    evidence: >-
+      measure §3 y §6: 403 valores distintos en solo 430 filas no nulas (casi uno por
+      fila) y max 3820 < 4096: la forma tipica de una referencia dispersa.  Barrido de
+      desplazamiento sin maximo en +0 (95 % en +0, 97 % en -1; base 94 % en #44)
+      -> no se sostiene como indice.  Se queda en desconocido.
+
+  - offset: 24
+    length: 2
+    type: u16
+    name: enum_24
+    role: enumeracion pequena
+    confidence: inferred
+    min: 0
+    max: 185
+    values: [0, 34, 40, 43, 185]
+    evidence: >-
+      measure §3: 5 valores distintos (808 filas no nulas), todos< 256.  Con solo 4
+      valores no nulos no puede ser indice util: descartado como referencia.
+
+  - offset: 26
+    length: 2
+    type: u16
+    name: key_26
+    role: clave de serie (creciente)
+    confidence: unknown
+    min: 0
+    max: 15239
+    evidence: >-
+      measure §3: 1601 valores distintos, 11244..15239 en las series visibles, 914 ceros.
+      Max 15239 sale de todo rango de tabla conocida -> no es indice.  Crece con el
+      orden de fila dentro de la serie: se comporta como desplazamiento o contador.
+
+  - offset: 28
+    length: 2
+    type: u16
+    name: enum_28
+    role: enumeracion pequena
+    confidence: inferred
+    min: 0
+    max: 108
+    values: [0, 34, 39, 41, 42, 108]
+    evidence: "measure §3: 6 valores distintos; 1642 filas no nulas; racha constante hasta 844 filas"
+
+  - offset: 30
+    length: 2
+    type: u16
+    name: enum_30
+    role: enumeracion
+    confidence: unknown
+    min: 0
+    max: 984
+    evidence: >-
+      measure §3: 33 valores distintos; incluye una racha de 18 valores consecutivos
+      (846..863) con una sola fila cada uno, lo que sugiere un campo compuesto o un
+      contador, no una categoria limpia.
+
+  - offset: 32
+    length: 2
+    type: u16
+    name: marker_32
+    role: marcador / centinela
+    confidence: measured
+    min: 1
+    max: 9999
+    sentinel: 9999
+    width_forcing: "max 9999 > 255 -> u16"
+    evidence: >-
+      measure §2: 9999 (0x270F) aparece en 1022 filas; las 769 vacias lo llevan todas y
+      ninguna otra fila vacia carece de el.  En filas en uso toma valores de serie
+      (9600, 9700, 9800, 9900, 3999, 4000) constantes por bloque.
+
+  - offset: 34
+    length: 2
+    type: u16
+    name: name_index
+    role: indice a la tabla de nombres
+    confidence: measured
+    min: 0
+    max: 2997
+    reference: {limit: 3001, table_candidate: 4645}
+    semantics: "r = valor + 3 ; nombre en #4645..#4653 con slot 6*(r-4)"
+    evidence: >-
+      docs/SPEC-NAMES.md §6.3 (7 anclajes en pantalla) y tools/spec/verify_spec_names.py
+      (449 comprobaciones).  measure §3: 2308 valores distintos, 3675 filas no nulas,
+      max 2997 -> r max 3000, dentro de los 3001 registros de las tablas de nombres.
+
+  - offset: 36
+    length: 2
+    type: u16
+    name: ref_j
+    role: indice candidato (4096)
+    confidence: unknown
+    min: 0
+    max: 2779
+    reference: {limit: 4096, table_candidate: 41}
+    evidence: >-
+      measure §3 y §6: 31 valores distintos en 431 filas no nulas, max 2779.
+      Barrido de desplazamiento con caida brusca en +1 (94 % -> 15 %) que parecia
+      alineacion; comprobado en informes/t_08c3f16a/campo-36.txt: de los 30 valores no
+      nulos solo 2 son fin de racha poblada en #41 y no hay relacion con el rango de
+      +12 de las filas que lo llevan -> el 94 % era coincidencia de densidad.
+
+  - offset: 38
+    length: 2
+    type: u16
+    name: key_38
+    role: constante de serie
+    confidence: unknown
+    min: 0
+    max: 16390
+    evidence: >-
+      measure §3: 68 valores distintos, 3740 filas no nulas; el byte bajo (+38, 0..19)
+      y el alto (+39, 0..64) se mueven juntos en escalones de 256.  Max 16390 sale de
+      todo rango de tabla conocida.
+
+  - offset: 40
+    length: 2
+    type: u16
+    name: ref_l
+    role: indice candidato (4096)
+    confidence: unknown
+    min: 0
+    max: 1280
+    reference: {limit: 4096, table_candidate: 41}
+    evidence: >-
+      measure §3 y §6: 48 valores distintos en 78 filas no nulas, max 1280.
+      Barrido sin maximo en +0 (83 % en +0 frente a 91 % en -1): descartado como indice.
+
+  - offset: 42
+    length: 1
+    type: u8
+    name: class_major
+    role: codigo de clase
+    confidence: measured
+    values: [0, 1, 9, 10]
+    evidence: >-
+      measure §2 y §4: 0 solo en las 769 filas vacias; en uso toma 1 (3107), 10 (605)
+      y 9 (119).  Junto con +43 parte las filas en uso en 5 clases con perfiles
+      distintos de +8, +58 y +32 (tabla de grupos de SPEC-ITEM-ROW.md).
+
+  - offset: 43
+    length: 1
+    type: u8
+    name: class_minor
+    role: codigo de clase
+    confidence: measured
+    values: [0, 1]
+    evidence: "measure §3: 563 filas con 1; completa el par (+42, +43) sin solaparse"
+
+  - offset: 44
+    length: 1
+    type: u8
+    name: flag_44
+    role: flag booleano
+    confidence: measured
+    values: [0, 1]
+    evidence: "measure §3: 62 filas a 1"
+
+  - offset: 45
+    length: 1
+    type: u8
+    name: flag_45
+    role: flag booleano
+    confidence: measured
+    values: [0, 1]
+    evidence: "measure §3: 196 filas a 1"
+
+  - offset: 46
+    length: 1
+    type: reserved
+    name: reserved_46
+    role: reservado
+    confidence: measured
+    must_be_zero: true
+    evidence: "measure §3: 1 valor distinto (0) en las 4600 filas"
+
+  - offset: 47
+    length: 1
+    type: u8
+    name: flag_47
+    role: flag booleano
+    confidence: measured
+    values: [0, 1]
+    evidence: "measure §3: 153 filas a 1"
+
+  - offset: 48
+    length: 1
+    type: u8
+    name: flag_48
+    role: flag booleano
+    confidence: measured
+    values: [0, 1]
+    evidence: "measure §3: 13 filas a 1"
+
+  - offset: 49
+    length: 1
+    type: u8
+    name: flag_49
+    role: flag booleano
+    confidence: measured
+    values: [0, 1]
+    evidence: "measure §3: 1 fila a 1 (existe, no es relleno)"
+
+  - offset: 50
+    length: 1
+    type: u8
+    name: flag_50
+    role: flag booleano
+    confidence: measured
+    values: [0, 1]
+    evidence: "measure §3: 525 filas a 1"
+
+  - offset: 51
+    length: 1
+    type: u8
+    name: flag_51
+    role: flag booleano
+    confidence: measured
+    values: [0, 1]
+    evidence: "measure §3: 2 filas a 1"
+
+  - offset: 52
+    length: 1
+    type: u8
+    name: flag_52
+    role: flag booleano
+    confidence: measured
+    values: [0, 1]
+    evidence: "measure §3: 73 filas a 1"
+
+  - offset: 53
+    length: 1
+    type: reserved
+    name: reserved_53
+    role: reservado
+    confidence: measured
+    must_be_zero: true
+    evidence: "measure §3: 1 valor distinto (0)"
+
+  - offset: 54
+    length: 1
+    type: u8
+    name: flag_54
+    role: flag booleano
+    confidence: measured
+    values: [0, 1]
+    evidence: "measure §3: 5 filas a 1"
+
+  - offset: 55
+    length: 1
+    type: u8
+    name: enum_55
+    role: enumeracion pequena
+    confidence: unknown
+    values: [0, 1, 8]
+    evidence: "measure §3: 75 filas a 1 y 29 a 8; el resto 0"
+
+  - offset: 56
+    length: 2
+    type: u16
+    name: key_56
+    role: entero pequeno de serie
+    confidence: unknown
+    min: 0
+    max: 1536
+    evidence: >-
+      measure §3: 42 valores distintos, 0..1536, con el byte alto (+57, 0..6) moviendose
+      en escalones de 256.  El barrido de desplazamiento no muestra alineacion con #41
+      ni #44; con 42 valores no puede ser un indice de 4096 filas.
+
+  - offset: 58
+    length: 2
+    type: u16
+    name: key_58
+    role: entero pequeno de serie
+    confidence: unknown
+    min: 0
+    max: 2050
+    evidence: >-
+      measure §4: 24 valores distintos (1, 2, 6..21 y combinaciones de dos bytes) y
+      fuertemente ligado a la clase: (+42=10,+43=1) lo tiene a 7 en las 83 filas,
+      (+42=9,+43=0) a 2 en 100 de 118.  Barrido peor en +0 que en +-1: no es indice.
+
+  - offset: 60
+    length: 1
+    type: u8
+    name: flag_60
+    role: flag booleano
+    confidence: measured
+    values: [0, 1]
+    evidence: "measure §3: 242 filas a 1"
+
+  - offset: 61
+    length: 1
+    type: reserved
+    name: reserved_61
+    role: reservado
+    confidence: measured
+    must_be_zero: true
+    evidence: "measure §3: 1 valor distinto (0)"
+
+  - offset: 62
+    length: 1
+    type: reserved
+    name: reserved_62
+    role: reservado
+    confidence: measured
+    must_be_zero: true
+    evidence: "measure §3: 1 valor distinto (0); el +63 que le sigue si varia"
+
+  - offset: 63
+    length: 1
+    type: u8
+    name: enum_63
+    role: enumeracion pequena
+    confidence: unknown
+    min: 0
+    max: 6
+    evidence: "measure §3: 7 valores (0..6), 61 filas no nulas"
+
+  - offset: 64
+    length: 2
+    type: u16
+    name: mask_64
+    role: mascara de bits
+    confidence: unknown
+    min: 0
+    max: 45312
+    evidence: >-
+      measure §3: 22 valores distintos, todos combinaciones de bits altos
+      (1, 512, 1024, 2048, 4096, 5120, 8192, 8704, 12288, 16384, 20480, 36864, 45056...);
+      8192 domina con 970 filas.  Max 45312 sale de todo rango de tabla conocida.
+
+  - offset: 66
+    length: 1
+    type: u8
+    name: enum_66
+    role: enumeracion de flags
+    confidence: unknown
+    values: [0, 1, 4, 8, 10, 12]
+    evidence: >-
+      measure §3: 6 valores; 10 y 12 no son potencias de dos sueltas sino combinaciones
+      (10 = 8+2, 12 = 8+4), asi que se lee como mascara de 4 bits empaquetada.
+
+  - offset: 67
+    length: 1
+    type: reserved
+    name: reserved_67
+    role: reservado
+    confidence: measured
+    must_be_zero: true
+    evidence: "measure §3: 1 valor distinto (0)"
+
+# Grupos = valor de (+42, +43).  Se describen por comportamiento medido, no por
+# contenido.  El validador comprueba que todo (42, 43) observado cae en un grupo
+# declarado; los recuentos se contrastan con los medidos.
+groups:
+  - id: empty
+    match: {42: 0, 43: 0}
+    rows_measured: 769
+    behaviour: "vacia: todo cero salvo el centinela 9999 en +32"
+  - id: class_1_0
+    match: {42: 1, 43: 0}
+    rows_measured: 2628
+    behaviour: >-
+      clase mayoritaria.  +8 con 14 escalones (1 domina, 1094 filas), +58 de 1 a 15,
+      +12 no nulo en 2365 de 2628, +22 no nulo en 363, +32 casi siempre 9600/9900/9700.
+  - id: class_10_0
+    match: {42: 10, 43: 0}
+    rows_measured: 522
+    behaviour: >-
+      +8 con 12 escalones (1 domina, 204), +58 de 1 a 18, +12 no nulo en 475 de 522,
+      +22 no nulo en 62, +40 siempre 0, +32 con 9999 en 224 (la unica clase donde el
+      centinela convive con datos).
+  - id: class_1_1
+    match: {42: 1, 43: 1}
+    rows_measured: 479
+    behaviour: >-
+      +8 concentrado en 100 (326 filas) y 50 (76), +58 clavado en {6, 7} (479 de 479),
+      +12 no nulo en solo 65, +22 siempre 0, +32 sin valor dominante (casi unico por fila).
+  - id: class_9_0
+    match: {42: 9, 43: 0}
+    rows_measured: 118
+    behaviour: >-
+      +8 = 10 en 103 filas, +58 = 2 en 100, +12 no nulo en 115 de 118, +32 = 4000 en 100,
+      +22 no nulo en 5.
+  - id: class_10_1
+    match: {42: 10, 43: 1}
+    rows_measured: 83
+    behaviour: >-
+      +8 = 100 en 71 filas, +58 = 7 en las 83, +12 no nulo en solo 15, +22 siempre 0,
+      +40 no nulo en 10, +32 sin valor dominante.
+  - id: class_9_1
+    match: {42: 9, 43: 1}
+    rows_measured: 1
+    behaviour: "una sola fila; perfil de class_10_1 (+58 = 7, +8 = 100)"
+
+# Invariantes globales que el validador comprueba ademas de los limites de campo.
+invariants:
+  - id: cover_row
+    kind: tiling
+    description: "los campos cubren 0..67 sin huecos ni solapes"
+  - id: header_consistent
+    kind: header
+    description: "count y version de la cabecera iguales a lo declarado y tamano = 64 + count*68"
+  - id: empty_coherent
+    kind: empty_row_bidirectional
+    description: "(vacia por contenido) <=> (+42 == 0)"
+  - id: groups_exhaustive
+    kind: groups
+    description: "todo par (42, 43) observado pertenece a un grupo declarado"
+  - id: reference_bounds
+    kind: reference
+    description: "todo campo con `reference` cabe en el limite de la tabla destino"

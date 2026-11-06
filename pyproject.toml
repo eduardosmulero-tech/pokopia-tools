@@ -1,0 +1,14 @@
+[project]
+name = "pokopia-tools"
+version = "0.1.0"
+description = "Kit de datos del contenedor: lectura, esquema, mods y save."
+# Fijado a lo que se midio: la suite se declara para 3.11 y NO se firma fuera de el.
+requires-python = ">=3.11,<3.12"
+
+[tool.pokopia]
+# Build de zlib con el que se midio la identidad byte a byte del contenedor.
+# Con zlib-ng solo 488/12298 entradas salen identicas (informe t_91cb4081).
+zlib = "1.3.2"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
