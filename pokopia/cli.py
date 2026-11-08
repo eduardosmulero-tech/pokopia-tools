@@ -1209,7 +1209,7 @@ def cmd_snd_replace(args) -> int:
 
 
 def cmd_snd_import(args) -> int:
-    """Mete un WAV propio en un stream MS ADPCM (codificado por el kit)."""
+    """Mete un WAV propio en un stream del banco (MS ADPCM o KA1A)."""
     from . import audio as pkp_audio
 
     destino = args.out or args.bank
@@ -1226,34 +1226,59 @@ def cmd_snd_import(args) -> int:
         out(sys.stderr, "ERROR: el stream %d es externo: su audio no esta en este banco"
             % stream.index)
         return EXIT_INVALID
-    if stream.codec != "msadpcm":
+    if stream.codec not in ("msadpcm", "ka1a"):
         out(sys.stderr,
-            "ERROR: el stream %d es %s y solo se puede codificar MS ADPCM.\n"
-            "  De los %d streams con datos dentro del banco, MS ADPCM es el unico\n"
-            "  con codificador; KA1A es un codec de transformada y no hay encoder\n"
-            "  (docs/AUDIO-PROPIO.md)."
+            "ERROR: el stream %d es %s y este kit codifica MS ADPCM y KA1A.\n"
+            "  De los %d streams con datos dentro del banco, esos son los dos\n"
+            "  codecs que llevan audio; ver docs/AUDIO-PROPIO.md."
             % (stream.index, stream.codec, len(banco.streams)))
         return EXIT_INVALID
 
-    bloque = snd.msadpcm_block_size(data, stream)
     muestras, rate, canales = pkp_audio.read_wav(args.wav)
     if canales != 1:
         out(sys.stderr,
             "ERROR: %s tiene %d canales y los streams del banco son mono;\n"
             "  exporta el canal que quieras con `ffmpeg -ac 1`" % (args.wav, canales))
         return EXIT_USAGE
-    payload = pkp_audio.msadpcm_encode(muestras, bloque)
-    nuevo = snd.StreamAudio(codec="msadpcm", sample_rate=rate,
-                            num_samples=len(muestras), payload=payload,
-                            block_size=bloque, loop_start=args.loop)
+
+    if stream.codec == "msadpcm":
+        bloque = snd.msadpcm_block_size(data, stream)
+        payload = pkp_audio.msadpcm_encode(muestras, bloque)
+        nuevo = snd.StreamAudio(codec="msadpcm", sample_rate=rate,
+                                num_samples=len(muestras), payload=payload,
+                                block_size=bloque, loop_start=args.loop)
+        codificador = "msadpcm propio (bloque %d B)" % bloque
+        decodificado = pkp_audio.msadpcm_decode(payload, bloque, len(muestras))
+        snr = pkp_audio.msadpcm_snr_db(muestras, decodificado)
+        detalle = "%d B en %d bloques de %d B" % (len(payload),
+                                                  len(payload) // bloque, bloque)
+        error_maximo = max((abs(muestras[i] - decodificado[i])
+                            for i in range(len(decodificado))), default=0)
+    else:
+        modo = snd.ka1a_bitrate_mode(data, stream)
+        try:
+            payload = pkp_audio.ka1a_encode(muestras, modo)
+        except pkp_audio.AudioError as exc:
+            out(sys.stderr, "ERROR: %s" % exc)
+            return EXIT_INVALID
+        nuevo = snd.StreamAudio(codec="ka1a", sample_rate=rate,
+                                num_samples=len(muestras), payload=payload,
+                                loop_start=args.loop, bitrate_mode=modo)
+        tramas = pkp_audio.ka1a_frame_count(len(muestras))
+        codificador = ("ka1a propio (modo %+d, frame de %d B)"
+                       % (modo, pkp_audio.ka1a_frame_size(modo)))
+        decodificado = pkp_audio.ka1a_decode(payload, modo, len(muestras))
+        snr = pkp_audio.ka1a_snr_db(muestras, decodificado)
+        detalle = "%d B en %d frames de %d B" % (len(payload), tramas,
+                                                 pkp_audio.ka1a_frame_size(modo))
+        error_maximo = max((abs(muestras[i] / 32767.0 - decodificado[i])
+                            for i in range(len(decodificado))), default=0.0)
+
     modificado = snd.set_stream_audio(data, args.stream, nuevo)
     snd.write_bank(destino, modificado)
     despues = paths.sha256_file(destino)
     verificado = snd.parse(modificado)
     comprobado = verificado.stream(args.stream)
-
-    snr = pkp_audio.msadpcm_snr_db(
-        muestras, pkp_audio.msadpcm_decode(payload, bloque, len(muestras)))
 
     if args.json:
         doc = {"source": os.path.abspath(args.bank), "written": os.path.abspath(destino),
@@ -1263,7 +1288,8 @@ def cmd_snd_import(args) -> int:
                "streams_after": len(verificado.streams),
                "wav": os.path.abspath(args.wav),
                "audio": nuevo.as_dict(),
-               "encoder": "msadpcm propio (bloque %d B)" % bloque,
+               "encoder": codificador,
+               "encoded": detalle,
                "snr_db": round(snr, 3),
                "backup": destino + ".orig" if os.path.exists(destino + ".orig") else None}
         json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
@@ -1272,9 +1298,11 @@ def cmd_snd_import(args) -> int:
     out(sys.stdout, "WAV       : %s (%d muestras, %d Hz, %s)"
         % (os.path.abspath(args.wav), len(muestras), rate,
            "mono" if canales == 1 else "%d canales" % canales))
-    out(sys.stdout, "codificado: %d B en %d bloques de %d B (SNR ida y vuelta %s)"
-        % (len(payload), len(payload) // bloque, bloque,
-           "%.2f dB" % snr if snr is not None else "n/d"))
+    out(sys.stdout, "codificado: %s (SNR ida y vuelta %s, error maximo %s)"
+        % (detalle, "%.2f dB" % snr if snr is not None else "n/d",
+           ("%.0f LSB" % (error_maximo * 32767)) if stream.codec == "ka1a"
+           else "%.0f LSB" % error_maximo))
+    out(sys.stdout, "encoder   : %s" % codificador)
     out(sys.stdout, "stream    : %d  %d Hz, %d muestras, %.3f s, bucle %d"
         % (comprobado.index, comprobado.sample_rate, comprobado.num_samples,
            comprobado.duration, comprobado.loop_start))
@@ -1504,6 +1532,7 @@ def build_parser() -> argparse.ArgumentParser:
     grupo.add_argument("--same", action="store_true",
                        help="reescribir la misma textura sin tocar pixeles (round-trip neutro)")
     p.set_defaults(func=texcmd.cmd_tex_inject)
+
     an = sub.add_parser("anim",
                         help="animaciones G2A (tipo g1a del .fdata): listar, ver, exportar, reescribir")
     ansub = an.add_subparsers(dest="animcmd", required=True)
@@ -1636,10 +1665,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_snd_replace)
 
     p = snsub.add_parser("import",
-                         help="meter un WAV propio en un stream MS ADPCM (codificado aqui)",
+                         help="meter un WAV propio en un stream (MS ADPCM o KA1A)",
                          parents=[common])
     p.add_argument("bank", help="fichero .srsa de partida")
-    p.add_argument("--stream", type=int, required=True, help="stream MS ADPCM que se sustituye")
+    p.add_argument("--stream", type=int, required=True,
+                   help="stream que se sustituye (se codifica con el codec y el "
+                        "modo de bitrate que ya tiene)")
     p.add_argument("--wav", required=True,
                    help="WAV PCM 16 bits mono; su frecuencia es la que se escribe en la cabecera")
     p.add_argument("--loop", type=int, default=-1,
@@ -1698,10 +1729,10 @@ def main(argv: list[str] | None = None) -> int:
     except g1t.G1TError as exc:
         out(sys.stderr, "ERROR: %s" % exc)
         return getattr(exc, "exit_code", EXIT_INVALID)
-    except snd.SndError as exc:
+    except (texcmd.textures.TextureBackendMissing, texcmd.textures.TextureFormatError) as exc:
         out(sys.stderr, "ERROR: %s" % exc)
         return getattr(exc, "exit_code", EXIT_INVALID)
-    except (texcmd.textures.TextureBackendMissing, texcmd.textures.TextureFormatError) as exc:
+    except snd.SndError as exc:
         out(sys.stderr, "ERROR: %s" % exc)
         return getattr(exc, "exit_code", EXIT_INVALID)
     except BrokenPipeError:  # pragma: no cover

@@ -240,8 +240,10 @@ def test_consenso():
 # --- CLI -------------------------------------------------------------------
 
 def _cli(*argv):
-    pytest.importorskip("tools.texto_largo",
-                        reason="tools/ no viaja en la release: el censo vive en tools/")
+    ruta = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "tools", "texto_largo.py")
+    if not os.path.isfile(ruta):
+        pytest.skip("tools/ no viaja en la release: la CLI de texto vive en tools/")
     from tools import texto_largo
     return texto_largo.main(list(argv))
 

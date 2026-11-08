@@ -46,11 +46,12 @@ def chunk_sonido(index: int, payload: bytes, *, codec: str = "ka1a",
                  rate: int = 48000, muestras: int = 1000, loop: int = -1,
                  nombre: str = "", cifrado: bool = True,
                  sound_id: int | None = None,
-                 bloque: int | None = None) -> bytes:
+                 bloque: int | None = None,
+                 modo: int = -1) -> bytes:
     """Un chunk de sonido completo con la geometria medida (cabecera en +0x20).
 
-    En KA1A la cabecera extra lleva el modo de bitrate (`-1` por defecto); en
-    MS ADPCM lleva dos `u16`: muestras por bloque y bytes por bloque, que se
+    En KA1A la cabecera extra lleva el modo de bitrate (`modo`, por defecto -1);
+    en MS ADPCM lleva dos `u16`: muestras por bloque y bytes por bloque, que se
     piden con `bloque`.
     """
     formato = snd.FORMAT_BY_CODEC[codec]
@@ -100,7 +101,7 @@ def chunk_sonido(index: int, payload: bytes, *, codec: str = "ka1a",
         struct.pack_into("<HH", cuerpo, hoff + 0x48,
                          (bloque - 7) * 2 + 2, bloque)            # MS ADPCM
     else:
-        struct.pack_into("<i", cuerpo, hoff + 0x48, -1)           # modo de bitrate
+        struct.pack_into("<i", cuerpo, hoff + 0x48, modo)          # modo de bitrate
     struct.pack_into("<I", cuerpo, hoff + 0x4C, inicio_datos - hoff)   # relativo a la cabecera
     struct.pack_into("<I", cuerpo, hoff + 0x50, len(payload))
     return bytes(cuerpo)

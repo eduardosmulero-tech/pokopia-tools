@@ -29,8 +29,11 @@ comunidad; aqui se ha **medido** sobre el build 655360 (juego 2.0.1a, plataforma
         [0] tamano en bytes | [1] float depth | [2] flags[1] en BIG endian
         [3] ancho real (si la seccion mide 16) | [4] alto real (si mide 20)
     --- pixeles ---
-    mip 0, luego mips 1..n contiguos; cada nivel con su relleno hasta tiles de
-    8x8 bloques (medido: reproduce el tamano exacto en 9.850 de las 14.713 texturas)
+    mip 0, luego mips 1..n contiguos; cada nivel **empieza en un multiplo de 512 B** y,
+    si mide menos de 512, ocupa 512 (medido: cuadra exacto en 13.985 de las 14.713
+    texturas del build, el 95,05 %; ver `informes/t_4ac7d51d/CONTRASTE-COMUNIDAD.md`).
+    La afirmacion anterior ("cada nivel con su relleno hasta tiles de 8x8 bloques") era
+    una hipotesis sin medir y no cuadraba: se retira.
 
 Referencias de comunidad usadas para contrastar (sin copiar codigo): `gust_tools`
 (VitaSmith, `gust_g1t.c`, **GPL-3.0**) y `fmt_g1m` (Joschuka, Noesis). De `gust_g1t.c`
@@ -54,6 +57,12 @@ HEADER_SIZE = 0x1C
 
 #: Cabecera de una textura antes del bloque extra.
 TEX_HEADER_SIZE = 8
+
+#: Alineacion de los niveles de mip, medida sobre el build 655360: cada nivel empieza
+#: en un multiplo de 512 B y, si mide menos, ocupa 512. Cuadra exacto en 13.985 de las
+#: 14.713 texturas (95,05 %); lo demas son arrays de texturas (`nb_frames` > 1) o los
+#: 641 casos que siguen sin explicar (ver el informe de contraste).
+MIP_ALIGN = 512
 
 #: Flags de textura (`gust_g1t.c`: nombres y mascaras). Solo caben 40 bits en la
 #: cabecera; lo que en `gust_g1t.c` pasa del bit 39 (`DOUBLE_HEIGHT`, `CUBE_MAP`...)
@@ -137,6 +146,11 @@ FORMATS: dict[int, Format] = {
 def format_of(code: int) -> Format:
     """El formato pedido; si no esta medido, se devuelve uno generico de 4 B/pixel."""
     return FORMATS.get(code) or Format(code, "0x%02x" % code, 4, 1, 4, False)
+
+
+def _alinear(n: int, align: int) -> int:
+    """`n` redondeado hacia arriba al multiplo de `align` mas cercano."""
+    return (n + align - 1) // align * align
 
 
 def _canonical_flags(raw: bytes) -> int:
@@ -312,6 +326,45 @@ class Texture:
             ancho, alto = max(1, ancho // 2), max(1, alto // 2)
         return salida
 
+    def mip_layout(self) -> list[tuple[int, int, int, int]]:
+        """[(offset, ancho, alto, bytes ocupados)] de cada nivel, **con el relleno medido**.
+
+        El offset es relativo a `data_offset`. Cada nivel empieza en un multiplo de
+        `MIP_ALIGN` (512 B) y, si sus pixeles miden menos, ocupa el bloque entero; el
+        ultimo nivel tambien se rellena. Medido: es la unica regla que cuadra el tamano
+        de las 4.741 texturas con relleno de 1.368 B y las 3.871 con 1.200 B, y coincide
+        con el aviso de `gust_g1t.exe` ("larger than expected size by 0x558" / "0x4b0").
+        """
+        salida = []
+        pos = 0
+        ancho, alto = self.width, self.height
+        for _ in range(self.mip_count):
+            ocupado = _alinear(self.format.size(ancho, alto), MIP_ALIGN)
+            salida.append((pos, ancho, alto, ocupado))
+            pos += ocupado
+            ancho, alto = max(1, ancho // 2), max(1, alto // 2)
+        return salida
+
+    @property
+    def chain_size_aligned(self) -> int:
+        """Bytes de la cadena de mips con el relleno a 512 B de cada nivel."""
+        return sum(n for _, _, _, n in self.mip_layout())
+
+    @property
+    def truncated(self) -> bool:
+        """True si el hueco del fichero es menor que la cadena de mips declarada.
+
+        Pasa con ficheros escritos por herramientas que no conservan los mips (G1Tool
+        los pierde al guardar) o con texturas cortadas. No impide leer: el payload se
+        copia tal cual, pero conviene verlo antes de reinyectar.
+        """
+        return self.data_size < self.frames_size
+
+    @property
+    def padding(self) -> int:
+        """Bytes del hueco que no son pixeles de la cadena declarada (puede ser negativo)."""
+        return self.data_size - self.frames_size
+
     @property
     def chain_size(self) -> int:
         return sum(t[2] for t in self.mip_sizes())
@@ -343,8 +396,10 @@ class Texture:
             "data_size": self.data_size,
             "mip0_size": self.mip0_size,
             "chain_size": self.chain_size,
+            "chain_size_aligned": self.chain_size_aligned,
             "expected_size": self.frames_size,
-            "padding": self.data_size - self.frames_size,
+            "padding": self.padding,
+            "truncated": self.truncated,
         }
 
 
@@ -365,6 +420,11 @@ class G1TFile:
     #: Datos extra globales, entre la tabla y la primera textura (`extra_size` B).
     #: Medido: 1008 B en las 3 G1T de version "1600"; 0 en el resto.
     global_extra: bytes = b""
+    #: Cola de ceros tolerada al leer: bytes que el fichero tiene de mas sobre lo que
+    #: declara su cabecera. `G1Tool` guarda la capacidad del `MemoryStream` en vez de su
+    #: longitud, asi que todo lo que escribe lleva ceros de cola (y su `total_size` se
+    #: queda corto). Se conserva para que `rebuild()` devuelva el fichero identico.
+    trailing: bytes = b""
 
     @property
     def platform_name(self) -> str:
@@ -401,6 +461,7 @@ class G1TFile:
         salida += tabla
         salida += self.global_extra
         salida += cuerpo
+        salida += self.trailing
         return bytes(salida)
 
     def with_payload(self, index: int, datos: bytes) -> bytes:
@@ -434,9 +495,17 @@ def parse(data: bytes, *, source_name: str = "") -> G1TFile:
     version = data[4:8]
     total_size, header_size, count, platform, extra_size = struct.unpack_from(
         "<5I", data, 8)
+    trailing = b""
     if total_size != len(data):
-        raise G1TError("%s: la cabecera declara %d B y el fichero mide %d"
-                       % (source_name or "g1t", total_size, len(data)))
+        # Tolerancia medida: ficheros de `G1Tool` (y de otros escritores que redondean
+        # la reserva de memoria) declaran menos bytes de los que ocupan y rellenan con
+        # ceros. Solo se acepta si lo que sobra son ceros y el sobrante es la cola.
+        sobra = data[total_size:] if total_size < len(data) else b""
+        if sobra and not sobra.strip(b"\x00"):
+            trailing = sobra
+        else:
+            raise G1TError("%s: la cabecera declara %d B y el fichero mide %d"
+                           % (source_name or "g1t", total_size, len(data)))
     if header_size < HEADER_SIZE or header_size + 4 * count + extra_size > len(data):
         raise G1TError("%s: header_size 0x%x con %d texturas y %d B extra no cabe en %d B"
                        % (source_name or "g1t", header_size, count, extra_size, len(data)))
@@ -456,7 +525,7 @@ def parse(data: bytes, *, source_name: str = "") -> G1TFile:
         mip_sys, fmt, dxdy = struct.unpack_from("<3B", data, base)
         flags_raw = data[base + 3:base + TEX_HEADER_SIZE]
         pos = base + TEX_HEADER_SIZE
-        siguiente = (header_size + offsets[i + 1]) if i + 1 < count else len(data)
+        siguiente = (header_size + offsets[i + 1]) if i + 1 < count else total_size
         if siguiente < pos:
             raise G1TError("%s: textura %d no avanza (siguiente 0x%x < datos 0x%x)"
                            % (source_name or "g1t", i, siguiente, pos))
@@ -475,7 +544,7 @@ def parse(data: bytes, *, source_name: str = "") -> G1TFile:
     return G1TFile(version=version, total_size=total_size, header_size=header_size,
                    platform=platform, extra_size=extra_size,
                    textures=tuple(textos), source=data,
-                   pre_table=pre_table, global_extra=global_extra)
+                   pre_table=pre_table, global_extra=global_extra, trailing=trailing)
 
 
 def parse_file(path: str) -> G1TFile:

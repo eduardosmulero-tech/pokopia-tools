@@ -673,6 +673,8 @@ class StreamAudio:
     `payload` son los bytes crudos del codec (sin cabecera de banco).
     `block_size` solo lo usa MS ADPCM: es el tamano de bloque que se escribe en
     la cabecera extra y el que hay que usar para codificar `payload`.
+    `bitrate_mode` solo lo usa KA1A: es el modo (-5..+5) con el que se ha
+    codificado, y fija el tamano de frame del flujo.
     """
 
     codec: str
@@ -681,6 +683,7 @@ class StreamAudio:
     payload: bytes
     block_size: int = 0
     loop_start: int = -1
+    bitrate_mode: int | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -691,8 +694,23 @@ class StreamAudio:
                          if self.sample_rate else 0.0),
             "payload_bytes": len(self.payload),
             "block_size": self.block_size,
+            "bitrate_mode": self.bitrate_mode,
             "loop_start": self.loop_start,
         }
+
+
+def ka1a_bitrate_mode(data: bytes, stream: Stream) -> int:
+    """Modo de bitrate KA1A (-5..+5) que declara la cabecera extra del stream."""
+    if stream.codec != "ka1a":
+        raise SndStreamError(
+            "el stream %d es %s: el modo de bitrate solo se lee en KA1A"
+            % (stream.index, stream.codec))
+    extra, tamano = _audio_extra(data, stream)
+    if tamano < 4:
+        raise SndFormatError(
+            "sonido %d: cabecera extra de %d B, sin el modo de bitrate de KA1A"
+            % (stream.index, tamano))
+    return struct.unpack_from("<i", data, stream.header_offset + extra)[0]
 
 
 def msadpcm_block_size(data: bytes, stream: Stream) -> int:
@@ -714,11 +732,12 @@ def set_stream_audio(data: bytes, index: int, audio: StreamAudio) -> bytes:
 
     A diferencia de `replace_stream` (que solo reescribe bytes y, como mucho,
     copia la cabecera de otro sonido del juego), aqui la cabecera describe
-    **nuestro** audio: frecuencia, numero de muestras, bucle y -- en MS ADPCM --
-    el par muestras-por-bloque/bytes-por-bloque que el codificador ha usado.
+    **nuestro** audio: frecuencia, numero de muestras, bucle y -- segun el
+    codec -- el par muestras-por-bloque/bytes-por-bloque de MS ADPCM o el modo
+    de bitrate de KA1A.
 
-    El codec no se cambia nunca: si el destino es KA1A, no hay codificador y se
-    rechaza (ver `docs/AUDIO-PROPIO.md`).
+    El codec no se cambia nunca: el destino manda y el audio tiene que venir ya
+    codificado con ese codec.
     """
     banco = parse(data)
     stream = banco.stream(index)
@@ -735,38 +754,56 @@ def set_stream_audio(data: bytes, index: int, audio: StreamAudio) -> bytes:
         raise SndStreamError("frecuencia fuera de rango: %d" % audio.sample_rate)
     if audio.num_samples < 1:
         raise SndStreamError("sin muestras: %d" % audio.num_samples)
-    if stream.codec != "msadpcm":
+    if stream.codec not in ("msadpcm", "ka1a"):
         raise SndStreamError(
-            "no hay codificador para %s; solo MS ADPCM se puede codificar aqui "
+            "no hay codificador para %s; este kit codifica MS ADPCM y KA1A "
             "(ver docs/AUDIO-PROPIO.md)" % stream.codec)
-
-    bloque = audio.block_size
-    if bloque <= 7:
-        raise SndStreamError("bloque MS ADPCM de %d B: demasiado pequeno" % bloque)
-    if len(audio.payload) % bloque:
-        raise SndStreamError(
-            "el flujo mide %d B y no es multiplo del bloque de %d B"
-            % (len(audio.payload), bloque))
-    from .audio import msadpcm_block_samples as audio_block_samples  # sin ciclo: audio no importa snd
-    por_bloque = audio_block_samples(bloque)
-    capacidad = (len(audio.payload) // bloque) * por_bloque
-    if audio.num_samples > capacidad:
-        raise SndStreamError(
-            "%d muestras no caben en %d B de MS ADPCM (%d bloques x %d muestras = %d)"
-            % (audio.num_samples, len(audio.payload), len(audio.payload) // bloque,
-               por_bloque, capacidad))
 
     extra, tamano = _audio_extra(data, stream)
     if tamano < 4:
         raise SndFormatError(
-            "sonido %d: cabecera extra de %d B, sin sitio para el par de MS ADPCM"
+            "sonido %d: cabecera extra de %d B, sin los 4 B del codec"
             % (index, tamano))
     parcheado = bytearray(data)
     h = stream.header_offset
+
+    if stream.codec == "msadpcm":
+        bloque = audio.block_size
+        if bloque <= 7:
+            raise SndStreamError("bloque MS ADPCM de %d B: demasiado pequeno" % bloque)
+        if len(audio.payload) % bloque:
+            raise SndStreamError(
+                "el flujo mide %d B y no es multiplo del bloque de %d B"
+                % (len(audio.payload), bloque))
+        from .audio import msadpcm_block_samples as audio_block_samples  # sin ciclo: audio no importa snd
+        por_bloque = audio_block_samples(bloque)
+        capacidad = (len(audio.payload) // bloque) * por_bloque
+        if audio.num_samples > capacidad:
+            raise SndStreamError(
+                "%d muestras no caben en %d B de MS ADPCM (%d bloques x %d muestras = %d)"
+                % (audio.num_samples, len(audio.payload), len(audio.payload) // bloque,
+                   por_bloque, capacidad))
+        struct.pack_into("<HH", parcheado, h + extra, por_bloque, bloque)
+    else:
+        if audio.bitrate_mode is None:
+            raise SndStreamError(
+                "audio KA1A sin modo de bitrate: no se puede describir el frame")
+        from .audio import ka1a_frame_count, ka1a_frame_size  # sin ciclo
+        try:
+            frame = ka1a_frame_size(audio.bitrate_mode)
+            frames = ka1a_frame_count(audio.num_samples)
+        except Exception as exc:  # AudioError: modo fuera de rango
+            raise SndStreamError(str(exc)) from None
+        if len(audio.payload) != frames * frame:
+            raise SndStreamError(
+                "%d B de KA1A en modo %+d: se esperan %d frames de %d B = %d B"
+                % (len(audio.payload), audio.bitrate_mode, frames, frame,
+                   frames * frame))
+        struct.pack_into("<i", parcheado, h + extra, audio.bitrate_mode)
+
     struct.pack_into("<i", parcheado, h + 0x14, audio.sample_rate)
     struct.pack_into("<i", parcheado, h + 0x18, audio.num_samples)
     struct.pack_into("<i", parcheado, h + 0x20, audio.loop_start)
-    struct.pack_into("<HH", parcheado, h + extra, por_bloque, bloque)
     return replace_stream(bytes(parcheado), index, audio.payload)
 
 

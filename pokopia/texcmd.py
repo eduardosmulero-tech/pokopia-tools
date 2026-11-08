@@ -98,9 +98,14 @@ def cmd_tex_list(args) -> int:
         _out(sys.stdout, "  %-3s %-8s %11s %5s %11s %11s %9s"
              % ("#", "formato", "dimensiones", "mips", "datos", "cadena", "relleno"))
         for t in fichero["textures"]:
-            _out(sys.stdout, "  %-3d %-8s %5dx%-5d %5d %11d %11d %9d"
-                 % (t["index"], t["format"], t["width"], t["height"], t["mips"],
-                    t["data_size"], t["chain_size"], t["padding"]))
+            dims = "%dx%d" % (t["width"], t["height"])
+            if t["frames"] > 1:
+                dims += "x%d" % t["frames"]
+            aviso = "  TRUNCADA" if t["truncated"] else ""
+            _out(sys.stdout, "  %-3d %-8s %5s %5d %11d %11d %9d%s"
+                 % (t["index"], t["format"], dims, t["mips"],
+                    t["data_size"], t["chain_size_aligned"], t["padding"],
+                    aviso))
     return 0
 
 

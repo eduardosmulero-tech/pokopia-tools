@@ -221,14 +221,15 @@ def test_set_stream_audio_es_idempotente():
     assert una == dos
 
 
-def test_set_stream_audio_rechaza_ka1a_porque_no_hay_encoder():
+def test_set_stream_audio_rechaza_audio_ka1a_sin_modo():
     datos = banco_con_msadpcm()
-    fuente, flujo = flujo_msadpcm(1000)
+    fuente, _ = flujo_msadpcm(1000)
+    flujo = audio.ka1a_encode(fuente, -2)
     nuevo = snd.StreamAudio(codec="ka1a", sample_rate=40000,
                             num_samples=len(fuente), payload=flujo)
     with pytest.raises(snd.SndStreamError) as excinfo:
         snd.set_stream_audio(datos, 1, nuevo)
-    assert "KA1A" in str(excinfo.value) or "ka1a" in str(excinfo.value)
+    assert "modo de bitrate" in str(excinfo.value)
 
 
 def test_set_stream_audio_rechaza_cambio_de_codec_y_excesos():
@@ -311,13 +312,16 @@ def test_cli_import_exige_in_place_o_salida(tmp_path, capsys):
     assert "--in-place" in capsys.readouterr().err
 
 
-def test_cli_import_rechaza_ka1a_con_el_motivo(tmp_path, capsys):
+def test_cli_import_en_ka1a_funciona_igual_que_en_msadpcm(tmp_path, capsys):
+    # el stream 1 del banco sintetico es KA1A: el comando elige el codec solo
     ruta = escribir(tmp_path, "banco.srsa", banco_con_msadpcm())
     wav = str(tmp_path / "tono.wav")
     audio.write_wav(wav, seno(440.0, 512), 40000)
     assert main(["snd", "import", ruta, "--stream", "1", "--wav", wav,
-                 "--in-place"]) != 0
-    assert "KA1A" in capsys.readouterr().err
+                 "--in-place"]) == 0
+    salida = capsys.readouterr().out
+    assert "ka1a" in salida.lower()
+    assert "SNR" in salida
 
 
 def test_cli_import_rechaza_wav_estereo(tmp_path, capsys):

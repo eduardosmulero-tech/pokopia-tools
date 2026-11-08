@@ -161,6 +161,109 @@ def test_with_payload_no_cambia_tamanos():
 
 
 # ---------------------------------------------------------------------------
+# Relleno de los niveles de mip: 512 B (medido, ver informe de contraste)
+# ---------------------------------------------------------------------------
+
+
+def test_mip_layout_alinea_cada_nivel_a_512():
+    """dxt1 64x64 con 5 mips: niveles de 2048, 512, 512, 512 y 512 B, en ese orden.
+
+    Es el caso real de 4.741 texturas del build (relleno de 1.368 B = 0x558, el mismo
+    numero que avisa `gust_g1t.exe` al abrirlas).
+    """
+    pixeles = b"\xaa" * (2048 + 512 * 4)
+    datos = make_g1t([_cuerpo(0x50, 0x60, 0x66, b"\x00" * 5, b"", pixeles)])
+    tex = g1t.parse(datos).textures[0]
+    assert (tex.width, tex.height, tex.mip_count) == (64, 64, 5)
+    assert tex.mip_layout() == [(0, 64, 64, 2048), (2048, 32, 32, 512),
+                                (2560, 16, 16, 512), (3072, 8, 8, 512),
+                                (3584, 4, 4, 512)]
+    assert tex.chain_size == 2048 + 512 + 128 + 32 + 8
+    assert tex.chain_size_aligned == 4096
+    assert tex.data_size == 4096
+    assert tex.padding == 4096 - tex.chain_size == 1368
+    assert not tex.truncated
+
+
+def test_mip_layout_es_creciente_y_cabe_en_el_payload():
+    """Los offsets de los niveles son los que hacen falta para leer un mip concreto."""
+    pixeles = bytes((i * 7) & 0xFF for i in range(2048 + 512 * 4))
+    datos = make_g1t([_cuerpo(0x50, 0x60, 0x66, b"\x00" * 5, b"", pixeles)])
+    tex = g1t.parse(datos).textures[0]
+    for offset, _ancho, _alto, ocupado in tex.mip_layout():
+        assert offset + ocupado <= tex.data_size
+        assert offset % g1t.MIP_ALIGN == 0 or offset == 0
+    # el nivel 4 empieza en 3584 y sus 8 B reales son los primeros del bloque
+    assert pixeles[3584:3592] == bytes(((3584 + i) * 7) & 0xFF for i in range(8))
+
+
+def test_cadena_truncada_se_detecta():
+    """dxt1 8x8 declarando 2 mips pero con solo el nivel 0: es lo que deja `G1Tool`."""
+    datos = make_g1t([_cuerpo(0x20, 0x59, 0x33, b"\x00" * 5, b"", bytes(32))])
+    tex = g1t.parse(datos).textures[0]
+    assert tex.mip_count == 2
+    assert tex.chain_size == 40
+    assert tex.data_size == 32
+    assert tex.padding == -8
+    assert tex.truncated
+    assert g1t.parse(datos).textures[0].as_dict()["truncated"] is True
+
+
+def test_mip_layout_con_varios_fotogramas():
+    """Un array de texturas multiplica la cadena: 512x512 dxt1, 8 mips, 2 fotogramas.
+
+    Caso real (`0x57e5b452` / `0xfbd14419`, 360.448 B de datos): `gust_g1t.exe` avisa
+    "larger than expected size by 0x2ab0" = 10.928 B, que es justo `data - chain*frames`
+    contando la cadena **sin** alinear. Con la cadena alineada a 512, lo que sobra son
+    2 x 1.368 B: el relleno de los dos fotogramas.
+    """
+    seccion = struct.pack("<I", 12) + struct.pack("<f", 0.0) + struct.pack(">I", 0x20000000)
+    alineado = 131072 + 32768 + 8192 + 2048 + 512 + 512 + 512 + 512
+    crudo = 131072 + 32768 + 8192 + 2048 + 512 + 128 + 32 + 8
+    datos = make_g1t([_cuerpo(0x80, 0x60, 0x99, FLAGS_VISTOS, seccion, bytes(360448))])
+    tex = g1t.parse(datos).textures[0]
+    assert tex.nb_frames == 2
+    assert tex.chain_size == crudo == 174760
+    assert tex.chain_size_aligned == alineado == 176128
+    assert tex.frames_size == crudo * 2 == 349520
+    assert tex.data_size == 360448
+    assert tex.padding == 10928 == 0x2AB0
+    # lo que queda por encima de dos cadenas alineadas: 8 KiB, todavia sin explicar
+    assert tex.data_size - 2 * alineado == 8192
+    assert not tex.truncated
+
+
+# ---------------------------------------------------------------------------
+# Interoperabilidad con lo que escribe G1Tool
+# ---------------------------------------------------------------------------
+
+
+def test_cola_de_ceros_se_tolera_y_se_reconstruye_identica():
+    """G1Tool guarda la capacidad del MemoryStream: el fichero acaba en ceros de mas."""
+    datos = un_g1t_simple()
+    con_cola = datos + bytes(148)
+    doc = g1t.parse(con_cola, source_name="g1tool")
+    assert doc.total_size == len(datos)
+    assert doc.trailing == bytes(148)
+    assert len(doc.textures) == 1
+    assert doc.textures[0].data_size == 4          # la cola no se cuenta como pixeles
+    assert doc.rebuild() == con_cola
+
+
+def test_cola_que_no_es_de_ceros_sigue_siendo_error():
+    datos = un_g1t_simple() + b"\x01\x02\x03\x04"
+    with pytest.raises(g1t.G1TError, match="declara"):
+        g1t.parse(datos)
+
+
+def test_print_de_una_textura_truncada_no_revienta(tmp_path, capsys):
+    datos = make_g1t([_cuerpo(0x20, 0x59, 0x33, b"\x00" * 5, b"", bytes(32))])
+    ruta = _escribir(tmp_path, datos)
+    assert main(["tex", "list", ruta]) == 0
+    assert "TRUNCADA" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # Errores de cabecera
 # ---------------------------------------------------------------------------
 

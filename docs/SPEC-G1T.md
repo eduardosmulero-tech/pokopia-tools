@@ -1,9 +1,9 @@
 # Specification — `G1T` textures
 
-`G1T` is the texture container of the KTGL engine, the one that carries `GT1G` on disk (the tag
-reads reversed because a `u32` written as text comes out little-endian). Measured on the supported
-build, platform word `0x18` (Switch 2), over the **14,412 `g1t` entries** of the 24 `.fdata`
-archives: **14,713 textures** in total, because some files hold more than one.
+`G1T` is the texture container of the KTGL engine. On disk it carries `GT1G`, because a `u32`
+written as text comes out little-endian. Measured on the supported build (platform word `0x18`,
+Switch 2) over the **14,412 `g1t` entries** of the 24 `.fdata` archives: **14,713 textures** in
+total, because some files hold more than one.
 
 Everything here is checked by `pkp tex list` / `pkp tex stat` and by the byte-for-byte round trip
 of `pkp tex inject`. What was not measured is labelled **inferred**.
@@ -59,28 +59,38 @@ At `header_size + offset[i]`:
 
 **Measured trap:** in this build the `EXTENDED_DATA` flag (bit 0) is **not** set even though the
 `data[]` section is there. The parser does not trust the flag: it detects the section by
-arithmetic — what remains up to the next texture must be `len(data[]) + mip chain`, exactly or with
-trailing padding. If the flag happens to be set, it is honoured too.
+arithmetic — what remains up to the next texture must be `len(data[]) + mip chain` aligned to
+512 B per level (§3). If the flag happens to be set, it is honoured too.
 
 ---
 
 ## 3. Pixels and mips
 
-* `mip 0` at `data_offset`, then `mip 1 … mip n-1` **contiguously**, each half the side (minimum 1).
-* `data_size` is the byte count up to the next texture or to the end of the file, and it is **not
-  always** the exact chain: there is trailing padding. Measured split:
+* `mip 0` at `data_offset`, then `mip 1 … mip n-1` **contiguously**, each with half the side
+  (minimum 1).
+* **Every mip level starts on a multiple of 512 B**; if its pixels are smaller, it occupies the
+  whole block — including the last level:
 
-| Rule | Textures |
-|---|---|
-| `data_size` == exact chain | 9,850 |
-| the texture is the last in the file (so it carries the padding) | 4,788 |
-| neither | 75 |
+```
+offset_0     = 0
+offset_{i+1} = offset_i + align512(pixel_bytes(level_i))
+```
 
-  Typical padding is **+1,368 B** for 8-byte-per-block formats and **+1,200 B** for 16-byte ones,
-  with larger cases (up to +709,988 B) on big textures. `gust_g1t.c` discards it with the same
-  criterion ("Reducing texture size").
-* **Padding is preserved as-is**: `inject` rewrites `mip 0` only, leaving the remaining mips and the
-  tail untouched, so a `.g1t` never changes size.
+  Measured over the whole census (14,713 textures):
+
+| Model | Textures | % |
+|---|---|---|
+| 512 B chain, **exact** | **13,985** | **95.05 %** |
+| 512 B chain × N frames (N = 2..8) | 87 | 0.59 % |
+| Not explained yet (`tile_system=3`, `data_size` 6–48× the expected) | 641 | 4.36 % |
+
+  An earlier description of this format modelled the same phenomenon as a "+1,368 B / +1,200 B
+  trailing padding" and was wrong: `0x558` and `0x4b0` are exactly the remainders the per-level
+  alignment produces, and `gust_g1t.exe` reports them as such. This document replaces that
+  description.
+* `data_size` = bytes up to the next texture or to the end of the file.
+* **Padding is preserved as-is**: `inject` rewrites `mip 0` only, leaving the remaining mips and
+  the tail untouched, so a `.g1t` never changes size.
 
 ---
 
@@ -119,7 +129,7 @@ Blocks are **not** in row order: they go in tiles of `tile × tile` blocks with 
 inside each tile. The tile is clipped to the power of two that divides both dimensions (the same
 restriction `gust_g1t.c` applies).
 
-Measurement on a real `dxt1 1024×1024` texture, mean jump between neighbouring pixels horizontally
+Measurement on a real `dxt1 1024×1024` texture: mean jump between neighbouring pixels horizontally
 (`dx`) and vertically (`dy`) when undoing the swizzle with different tiles:
 
 | Tile | `dx` | `dy` |

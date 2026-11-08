@@ -5,9 +5,12 @@ them). Each one is a small container: `ASRS` for the file, `KTSR` for the bank, 
 chunks — one per sound, one per cue, a few per state. The audio itself is **not** decrypted or
 unpacked: it is stored raw, either as MS ADPCM or as Koei Tecmo's `KA1A`.
 
-This document covers what is inside a bank, how the kit reads it, and the **three ways to write
-one**: swap two sounds, drop another stream into a slot, or encode audio of your own. The last one
-only reaches **3.47 % of the banks** and this document says so with the measurement attached.
+This document covers what is inside a bank, how the kit reads it, and the **four ways to write
+one**: swap two sounds, drop another stream into a slot, copy a stream from another bank, or
+encode audio of your own. The last one used to reach **3.47 % of the banks**; with a `KA1A`
+encoder it now reaches **every stream whose audio lives inside its bank** — 18,835 of 18,835
+streams in **398 of 403** banks (98.76 %). The 5 banks left out point at an `.srst` that the RomFS
+does not ship, so there is nothing to write into them.
 
 Everything was measured on the supported build ([README](../README.md#supported-build)). The
 external judge is **vgmstream r2168**, which opens these banks with its own `KTSR` parser; where a
@@ -163,21 +166,27 @@ instead of returning bytes from somewhere else.
 
 ---
 
-## 4. The two codecs, and what is missing
+## 4. The two codecs
 
-| Codec | Streams with data inside the bank | Share | Decoder in the kit |
-|---|---|---|---|
-| `KA1A` | 18,558 | 98.53 % | yes, to WAV |
-| MS ADPCM | 277 | 1.47 % | yes (and an **encoder**, §6) |
+| Codec | Streams with data inside the bank | Share | Decoder | Encoder |
+|---|---|---|---|---|
+| `KA1A` | 18,558 | 98.53 % | yes, to WAV | **yes, §6** |
+| MS ADPCM | 277 | 1.47 % | yes | yes, §6 |
 
-`KA1A` is a **transform** codec: frames of 512 samples, 21 bands, per-frame delays. `vgmstream`
-decodes it (`ktsr.c`); **no encoder exists outside Koei Tecmo**, and nothing public implements one.
-The geometry of all 18,558 streams is accounted for, and the cost of writing an encoder is
-estimated at 700–900 lines and 3–5 days in the project's internal notes — which is why this
-version does not attempt it.
+`KA1A` is a **transform** codec: frames of 512 samples, 21 bands, per-frame delays, coefficients
+quantised into 8-bit logarithmic codes. `vgmstream` decodes it; **no encoder existed outside Koei
+Tecmo** until this one. The byte-level specification, the tables and the measured quality are in
+**[AUDIO-KA1A.md](AUDIO-KA1A.md)**; what matters here:
 
-That is the honest boundary of "your own audio": it works on the MS ADPCM streams and on nothing
-else.
+* the frame size is fixed by a **bitrate mode** stored in the stream header, `-5`..`+5`; the kit
+  writes with the mode the destination already declares, so the frame never changes size;
+* the geometry of all 18,558 streams is accounted for: `data size == (ceil(samples/512) + 1) ×
+  frame bytes`, **0 exceptions** in the dump;
+* round-trip quality on harmonic material is **33–42 dB SNR**; on white noise it is 3–4 dB, because
+  the format codes 92–170 of 512 coefficients. That is the codec, not a bug.
+
+MS ADPCM is the classic Microsoft block codec: 7-byte block header, adaptive delta, 4-bit nibbles,
+and here **262 B = 512 samples** per block in every bank.
 
 ---
 
@@ -192,7 +201,7 @@ not reproduce the names themselves.
 
 ---
 
-## 6. Writing: three routes, and the coverage of each
+## 6. Writing: four routes, and the coverage of each
 
 ```
 pkp snd list    <bank.srsa> [--json]
@@ -200,7 +209,7 @@ pkp snd extract <bank.srsa> --out <dir> [--stream N]
 pkp snd stat    <dir>
 pkp snd replace <bank.srsa> --swap A B              [-o out | --in-place]
 pkp snd replace <bank.srsa> --stream N --file F [--from-banco B --from-stream M]
-                                                   [-o out | --in-place]
+                                                    [-o out | --in-place]
 pkp snd import  <bank.srsa> --stream N --wav F.wav [--loop MS] [-o out | --in-place]
 ```
 
@@ -209,11 +218,18 @@ pkp snd import  <bank.srsa> --stream N --wav F.wav [--loop MS] [-o out | --in-pl
 | (a) swap two chunks inside one bank | **18,832** | 99.98 % |
 | (b) put a stream with the same codec and size into a slot, same bank | **16,898** | 89.72 % |
 | (b') the same, taking the stream from any bank in the tree | **18,473** (532 codec+size groups) | 98.08 % |
-| (c) **your own audio** (`pkp snd import`, MS ADPCM only) | **277**, in **14 of 403** banks | **3.47 % of the banks** (1.47 % of the streams) |
+| (c) **your own audio** (`pkp snd import`, MS ADPCM **or** `KA1A`) | **18,835**, in **398 of 403** banks | **98.76 % of the banks** (100 % of the internal streams) |
 
 Routes (a) and (b) **do not re-encode a byte**: they move audio that is already compressed. The 3
 streams that reject (a) are alone in their bank (nothing to swap with), but (b) still works on
 them. Measured distribution: 384 `KA1A`-only banks, 12 mixed, 2 `MS ADPCM`-only, 5 fully external.
+
+Route (c) by codec, counted **per bank**: 384 banks hold only `KA1A` streams, 12 hold both codecs,
+2 hold only MS ADPCM and 5 have nothing internal. A bank with at least one internal stream accepts
+`pkp snd import`, whichever of the two codecs it holds.
+
+Before the `KA1A` encoder, 277 streams in **14 of 403** banks (**3.47 %**) were the whole story;
+that figure was correct for the previous release and is stated here so it can be compared.
 
 What the writer guarantees in every route:
 
@@ -227,7 +243,7 @@ What the writer guarantees in every route:
 Undo is `cp bank.srsa.orig bank.srsa`; the sha256 returns to the original, which the verification
 scripts check.
 
-### The MS ADPCM encoder
+### 6.1 The MS ADPCM encoder
 
 `pkp snd import` encodes your WAV **locally** (no `ffmpeg` at run time) with the block geometry the
 destination declares: in this dump every block is **262 B = 512 samples** (7-byte header + 255
@@ -243,9 +259,22 @@ zero.
 Why not just use `ffmpeg`? Its `adpcm_ms` encoder requires a block size that is a power of two
 (`ffmpeg -h encoder=adpcm_ms`), and these banks use 262 B. Hence the encoder in this repository.
 
-The command rewrites rate, sample count, loop and the samples/bytes-per-block pair, and leaves the
-sound id, the name, the codec and every other stream untouched. A stereo WAV is **refused**
-instead of being silently mixed down, and so is a sample outside PCM16 range.
+### 6.2 The `KA1A` encoder
+
+`pkp snd import` also accepts a `KA1A` destination, and then it encodes with the kit's own
+transform encoder, **in the bitrate mode the destination declares** (`-2`, `+0` and `+4` are the
+three that exist in this dump in volume: 12,311 / 1,456 / 4,507 streams). The command rewrites
+sample rate, sample count and loop, keeps the frame size fixed, and prints the round-trip SNR it
+measured on your own audio.
+
+Measured on 3 real banks (modes `+4`, `+0`, `-2`), on a **copy**: the tone goes in, the stream
+count is identical (3→3, 348→348, 41→41), the untouched streams stay byte-identical
+(2/2, 347/347, 40/40), and restoring the backup gives back the original sha256. `vgmstream`
+decodes our stream within **1 LSB** of our own decoder.
+
+What it does **not** do: it does not choose the mode for you, it does not encode stereo (there is
+no stereo stream in this dump and a stereo WAV is refused, not mixed down), and it does not
+re-encode the rest of the bank.
 
 ---
 
@@ -259,7 +288,8 @@ touched stream does not change or if an untouched one does.
 
 For your own audio there are two extra checks, and both can be repeated with a plain `vgmstream`
 build: the PCM it returns matches the kit's decoder sample for sample (**0 differing samples** on
-the reference tone), and the tone you inserted dominates the decoded audio.
+the MS ADPCM reference tone, **1 LSB** at worst on `KA1A`), and the tone you inserted dominates the
+decoded audio.
 
 What this does **not** prove: that the game's engine accepts the result. For that the bank has to
 go back into its `.fdata`, and `.fdata` writing is not implemented in this version — so a modified
@@ -269,8 +299,9 @@ bank stops at a file in `build/`. **Nothing from this route is known to sound in
 
 ## 8. Provenance
 
-* **vgmstream** (ISC) — `src/meta/ktsr.c` documents the container and the name cipher. No code was
-  copied; the kit's reader and writer are new.
+* **vgmstream** (ISC) — `src/meta/ktsr.c` documents the container and the name cipher;
+  `src/coding/libs/ka1a_dec.c` and `ka1a_dec_data.h` document the `KA1A` transform and its tables.
+  No code was copied; the kit's reader, writer and both encoders are new.
 * **FFmpeg** (LGPL/GPL) — `libavcodec/adpcm.c`, `adpcm_data.c`, `adpcm_data.h` were read for the
   factory coefficient table and the block arithmetic; no code was copied.
 * **Microsoft** — the MS ADPCM block specification (7-byte header, adaptive delta, 4-bit
@@ -288,6 +319,20 @@ python pkp.py snd stat build/srsa
 
 `pkp snd stat` prints the bank count, the streams with audio inside, the codec histogram and how
 many streams each write route accepts. On the supported build it must print **403** banks,
-**18,835** streams with audio inside, `{'ka1a': 18558, 'msadpcm': 277}`, and **277** gives the
-MS ADPCM coverage figure of §6: counting the banks that hold at least one of those 277 streams
-(`pkp snd list --json` per bank) gives **14 of 403 = 3.47 %**.
+**18,835** streams with audio inside and `{'ka1a': 18558, 'msadpcm': 277}`.
+
+The coverage figures of §6 come from the measurement tree's `tools/snd/cobertura_audio.py`, which
+counts, bank by bank, which streams accept `pkp snd import`. On the supported build it prints:
+
+```
+bancos                  : 403
+streams                 : 19297 (18835 con datos dentro, 462 externos)
+streams por codec       : ka1a 18558, msadpcm 277
+bancos solo externos    : 5
+AUDIO PROPIO (pkp snd import: MS ADPCM y KA1A)
+  bancos                : 398 de 403 (98.76 %)
+  streams               : 18835 de 18835 internos (100.00 %)
+```
+
+The 5 remaining banks contain only external streams, and `pkp snd import` refuses them with an
+explicit message instead of writing audio that the bank cannot address.
