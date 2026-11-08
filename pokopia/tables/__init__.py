@@ -10,6 +10,8 @@ from .registry import (  # noqa: F401
     FieldSpec,
     TableError,
     TableSpec,
+    block_sha256,
+    block_slots,
     build_pool,
     check_header,
     get,
@@ -22,7 +24,7 @@ from .registry import (  # noqa: F401
 
 __all__ = [
     "NAMES_LANGS", "PLURAL_SLOT", "SINGULAR_SLOT", "SLOTS_PER_BLOCK", "TABLES",
-    "TEXT_FIRST_ID", "FieldSpec", "TableError", "TableSpec", "build_pool",
-    "check_header", "get", "known", "parse_pool", "read_row", "slot_ordinal",
-    "table_name",
+    "TEXT_FIRST_ID", "FieldSpec", "TableError", "TableSpec", "block_sha256",
+    "block_slots", "build_pool", "check_header", "get", "known", "parse_pool",
+    "read_row", "slot_ordinal", "table_name",
 ]

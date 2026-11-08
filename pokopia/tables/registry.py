@@ -12,6 +12,7 @@ Cada tabla lleva `confidence`:
 
 from __future__ import annotations
 
+import hashlib
 import struct
 from dataclasses import dataclass, field
 
@@ -105,7 +106,18 @@ for i, lang in enumerate(NAMES_LANGS):
                    confidence="verified", source="docs/SPEC-NAMES.md §3.1",
                    note="nombres; pool en 96.102 (6 ceros de separacion, medido)"))
 
-#: primera/ultima id de texto valida (`r` en 4..count+3, docs/SPEC-NAMES.md §6)
+# --- tablas de texto con punteros + pool (docs/SPEC-DIALOGOS.md) ------------
+#: Familia de diálogo: 9 entradas = 9 idiomas, mismo `count` y misma fila = misma
+#: escena. Geometria: 64 B de cabecera, `count` registros de 8 B y pool en
+#: 64 + 8*count; `inicio(fila) = a - 8*(count - fila)`. Ver `textpool.py`.
+DIALOGOS_LANGS = ("jp", "en", "fr", "it", "de", "es", "zh-TW", "kr", "zh-CN")
+for i, lang in enumerate(DIALOGOS_LANGS):
+    _add(TableSpec(index=3250 + i, kind="pool", header=64, stride=8, count=391,
+                   version=2, pool_start=64 + 391 * 8, language=lang,
+                   confidence="verified", source="docs/SPEC-DIALOGOS.md §2 y §6",
+                   note="dialogos de escena; pool desde 3192 (medido, 391/391 filas)"))
+
+#: tabla de texto con punteros (`kind="pool"`): sin bloques de 6 slots
 TEXT_FIRST_ID = 4
 SLOTS_PER_BLOCK = 6
 SINGULAR_SLOT = 0
@@ -126,6 +138,8 @@ def table_name(index: int) -> str:
         return "#%d (sin geometria declarada)" % index
     if spec.kind == "text":
         return "#%d textos %s" % (index, spec.language)
+    if spec.kind == "pool":
+        return "#%d texto con punteros %s (%d filas)" % (index, spec.language, spec.count)
     return "#%d registros de %d B" % (index, spec.stride)
 
 
@@ -198,3 +212,28 @@ def slot_ordinal(spec: TableSpec, text_id: int, slot: int = SINGULAR_SLOT) -> in
     if not 0 <= slot < SLOTS_PER_BLOCK:
         raise TableError("slot %d fuera de 0..%d" % (slot, SLOTS_PER_BLOCK - 1))
     return SLOTS_PER_BLOCK * (text_id - TEXT_FIRST_ID) + slot
+
+
+def block_slots(spec: TableSpec, slots: list[bytes], text_id: int) -> list[bytes]:
+    """Los slots del bloque de 6 de `text_id`, en orden `+0` -> `+5`.
+
+    Devuelve los que existan: el ultimo bloque del pool puede estar truncado (en
+    `#4650` hay 18.003 slots para 18.006 huecos, docs/SPEC-NAMES.md §6), y el
+    criterio de `expect_sha256` hashea lo que hay, no huecos vacios inventados.
+    """
+    if not TEXT_FIRST_ID <= text_id <= spec.count + 3:
+        raise TableError("id de texto %d fuera de rango (%d..%d) de #%d"
+                         % (text_id, TEXT_FIRST_ID, spec.count + 3, spec.index))
+    base = SLOTS_PER_BLOCK * (text_id - TEXT_FIRST_ID)
+    return slots[base:base + SLOTS_PER_BLOCK]
+
+
+def block_sha256(spec: TableSpec, slots: list[bytes], text_id: int) -> str:
+    """sha256 del bloque de `text_id` — criterio de `expect_sha256`.
+
+    Contrato (docs/MOD-FORMAT.md §3.1): se hashea la **concatenacion de los bytes
+    de los slots del bloque, en orden `+0` -> `+5`, tal cual estan en el pool**.
+    Sin terminador NUL, sin separador, sin normalizacion Unicode y sin
+    recodificar. Hexadecimal en minusculas, 64 caracteres.
+    """
+    return hashlib.sha256(b"".join(block_slots(spec, slots, text_id))).hexdigest()

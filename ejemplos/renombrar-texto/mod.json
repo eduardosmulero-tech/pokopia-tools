@@ -1,0 +1,40 @@
+{
+  "mod_format": 1,
+  "name": "ejemplo-renombrar-texto",
+  "version": "0.1.0",
+  "authors": [
+    "worker (tarjeta t_ca5be1e2)"
+  ],
+  "description": "Ejemplo: sustituye un texto que YA existe usando expect_sha256 (sha256 del bloque de 6 slots) en vez del texto en claro. El valor escrito es un marcador inventado, no contenido del juego.",
+  "game": {
+    "title": "pokopia",
+    "version": "2.0.1a",
+    "container_md5": {
+      "LD_C0_R.BIN": "358a672d506ce2b0399149ede64a6760",
+      "LI_C0_R.IDX": "7e056a097f28a62f002ad961a611edf8"
+    }
+  },
+  "requires": [],
+  "edits": [],
+  "text": [
+    {
+      "table": 4650,
+      "id": 5,
+      "slot": 0,
+      "expect_sha256": "4f1bac17691a8d4b7ed44ee3c0d4587f770a0cb2deb6920b01add38dd24b5813",
+      "value": "MOD-RENOMBRA-1",
+      "why": "slot 0 (singular) del bloque 6*(id-4); el expect_sha256 identifica el bloque de este build sin escribir su contenido (criterio en docs/MOD-FORMAT.md 3.1)",
+      "confidence": "verified"
+    },
+    {
+      "table": 4650,
+      "id": 5,
+      "slot": 2,
+      "expect_sha256": "4f1bac17691a8d4b7ed44ee3c0d4587f770a0cb2deb6920b01add38dd24b5813",
+      "value": "MOD-RENOMBRA-2",
+      "why": "slot 2 (plural) del MISMO bloque: el hash es el del bloque tal como esta en el contenedor antes del mod, no el que deja la edicion del slot 0 (docs/MOD-FORMAT.md 3.1)",
+      "confidence": "verified"
+    }
+  ],
+  "files": []
+}

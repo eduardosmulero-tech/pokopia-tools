@@ -128,13 +128,20 @@ def test_texto_edita_solo_su_slot(contenedor, tmp_path):
 
 
 def test_texto_expect_incorrecto(contenedor, tmp_path):
-    cont, _ = contenedor
+    cont, slots = contenedor
     mod = load_mod(_guardar(_mod_texto(cont, expect="lo que no hay"), tmp_path))
     antes = paths.container_md5(cont)
     res = apply_mod(mod, cont.dir, write=True)
     assert not res["ok"]
     texto = "\n".join(i["message"] for i in res["issues"])
-    assert "esperaba" in texto and "encontre otro texto" in texto
+    # Solo longitudes y sha256: ni el texto encontrado ni el esperado se imprimen
+    # (tarjeta t_ca5be1e2; antes el `%r` del expect sacaba el texto del juego).
+    assert "esperaba un texto de 13 B" in texto and "encontre otro de 0 B" in texto
+    assert "sha256" in texto
+    assert "lo que no hay" not in texto
+    for slot in slots:
+        if slot:
+            assert slot.decode() not in texto
     assert paths.container_md5(cont) == antes
 
 

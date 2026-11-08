@@ -124,6 +124,10 @@ A table **without** declared geometry can be edited anyway: it is warned about
 ## 3. `text[]` — text writes
 
 ```json
+{ "table": 4650, "id": 5, "slot": 0,
+  "expect_sha256": "4f1bac…b5813", "value": "MOD-RENOMBRA-1",
+  "why": "slot 0 (singular) of block 6*(id-4); the hash identifies the block of this build" }
+
 { "table": 4650, "id": 131, "slot": 0, "expect": "", "value": "MOD-TEXT-1",
   "why": "slot 0 (singular) of block 6*(id-4); this id has the block empty in this build" }
 ```
@@ -133,10 +137,14 @@ A table **without** declared geometry can be edited anyway: it is warned about
 | `table` | integer | **yes** | Must be a text table (`#4636`–`#4653`). |
 | `id` | integer | **yes** | Catalogue id. Valid: `4 … count+3` (here 4…3,004, `docs/SPEC-NAMES.md` §6). |
 | `slot` | integer 0–5 | no (`0`) | Offset inside the 6-slot block of the id. `0` = singular, `2` = plural. |
-| `expect` | string | **yes** | Current text of the slot (`""` if empty). |
+| `expect_sha256` | 64 lowercase hex | **one of the two** | sha256 of the block of `id`; the criterion is fixed in §3.1. This is the form that travels. |
+| `expect` | string | **one of the two** | Current text of the slot in clear (`""` if empty). Accepted, never published. |
 | `value` | string | **yes** | New text. UTF-8, no `\x00`. |
 | `why` | string | **yes** | As in `edits[]`. |
 | `confidence` | as in `edits[]` | no | |
+
+Declaring **both** `expect` and `expect_sha256`, or **neither**, is a schema error
+(`schema.text.expect`) and the mod does not load.
 
 How it is applied: the text zone is split into NUL-delimited slots, slot `6*(id-4)+slot` is
 replaced and the **whole pool is reserialised keeping the slot order**. That is:
@@ -151,10 +159,73 @@ replaced and the **whole pool is reserialised keeping the slot order**. That is:
 Practical consequence: `text` and `edits` on the **same** table can be combined, but only the
 `edits` go to the record area.
 
-**Text privacy:** error messages **never** print the text found; they identify it by length and
-truncated `sha256`. A failed `expect` says *how much* was expected and *how much* is there, never
-*what* is there. (The expected string is printed, because it comes from your own manifest, not
-from the game.)
+**Text privacy:** error messages **never** print the text found, and never print the text expected
+either. A failed `expect` reports *how many bytes* were expected and *how many* are there, plus the
+truncated `sha256` of what is there — never *what* is there, and never the string that was copied
+from the dump into a manifest.
+
+### 3.1 `expect_sha256` — the fixed criterion
+
+A text edit identifies the current content of its **block** (the six slots of `id`) by hash. The
+input of the hash is fixed here so that two people computing it on the same build get the same 64
+characters:
+
+> **sha256 over the concatenation of the bytes of the slots of the block, in order `+0` → `+5`,
+> exactly as they sit in the pool.**
+
+Concretely:
+
+* **no terminator**: the NUL that separates slots inside the pool is **not** part of the input;
+* **no separator** of any kind between slots — plain concatenation, nothing added;
+* **no Unicode normalisation and no re-encoding**: the bytes are the ones in the payload, whatever
+  they are (they are not required to be valid UTF-8, and nothing is decoded on the way);
+* the result is **lowercase hexadecimal, 64 characters**, no `0x` prefix, no spaces. Uppercase is a
+  schema error (`schema.text.expect_sha256`);
+* if the block has **fewer than six slots** in the pool — the last block of a table can be
+  truncated: `#4650` has 18,003 slots for 18,006 holes — the slots that exist are hashed, in order,
+  and nothing is invented to fill the gap;
+* a block whose slots are all empty hashes the empty byte string:
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+The hash covers the **whole block**, not the single slot being written: one hash identifies
+`(table, id)` completely, and `slot` still says which of the six slots is replaced.
+
+**Against which state it is compared.** The hash is checked against the block **as it sits in the
+container before the mod is applied** — the payload the author had in front of them when they wrote
+the hash. Never against the state left behind by earlier edits of the same mod, even when those
+edits touch the same block: the reference is immutable, and it is exactly the one `validate` uses.
+From that rule:
+
+* two edits in the **same table, different `id`** → each hash refers to its own block; both apply;
+* two edits of the **same block, different slots** (say `+0` and `+2` of one id) → both carry the
+  same digest of the pristine block and both apply; the result keeps both new texts;
+* two edits of the **same `(table, id, slot)`** → schema error `mod.text.duplicate` (with both
+  locations): the second would silently overwrite the first, so it is refused;
+* `validate` and `apply` compare the same thing against the same bytes, so they cannot disagree: if
+  `validate` accepts the hash, `apply` applies it.
+
+**How to obtain it.** `pkp row <table> <id>` prints the six slots (length and truncated sha256) and,
+on the last line, the digest of the block:
+
+```
+$ pkp row 4650 5
+#4650 textos es: count 3001, pool en 96102, 18003 slots (terminado=True)
+id 5 -> slots 6..11 del bloque
+  +0  17 B  sha256 935f8879d5e0
+  +1  0 B  sha256 e3b0c44298fc
+  +2  18 B  sha256 e2a8faa19321
+  +3  17 B  sha256 935f8879d5e0
+  +4  0 B  sha256 e3b0c44298fc
+  +5  18 B  sha256 e2a8faa19321
+  bloque  70 B en 6 slots  sha256 4f1bac…b5813
+  ^ este es el valor de 'expect_sha256' (docs/MOD-FORMAT.md §3.1)
+```
+
+**What it protects, and what it does not.** It keeps the text out of the manifest and out of every
+error message, so a mod can be published and reviewed without carrying a single line of the game's
+text. It does **not** make that content secret against a determined reader: a short string can be
+guessed from its hash with a dictionary. It protects against accidental publication, which is what
+the repository rule (`docs/NORMA-CONTENIDO-Y-PUBLICACION.md`) is about; it is not encryption.
 
 ---
 
@@ -178,6 +249,11 @@ written).
 Why exact overlap is a conflict even with the same value: the application order is not defined, and
 one mod's `expect` can stop being true once the other has been applied. Better to refuse than to
 guess.
+
+And that is why **same block, different slots does compose**: every `expect_sha256` is compared
+against the pristine block (§3.1), so two edits of one block do not invalidate each other's hash and
+the composed mod applies both. A pair on the **same `slot`** stays a conflict — the second would
+overwrite the first.
 
 ---
 
@@ -237,10 +313,13 @@ touch models or assets, or write to the save.
 |---|---|
 | Valid JSON, root is an object | error |
 | `mod_format`, `name`, `version`, `authors`, `game.*` | error (missing or wrong type) |
-| `expect` and `why` present in every edit | **error** |
+| `expect` and `why` present in every byte edit | **error** |
+| Exactly one of `expect` / `expect_sha256` in every text edit | **error** (both or neither) |
+| Two text edits on the same `(table, id, slot)` | error (`mod.text.duplicate`, both locations) |
+| `expect_sha256` not 64 lowercase hex characters | error |
 | Known `type` and values that fit it | error |
 | `offset + size <= stride`, `row < count` | error |
-| `expect` different from the real bytes | error, with *expected / found* |
+| `expect` different from the real bytes, or `expect_sha256` different from the real block | error, with *expected / found* (lengths and truncated sha256, never text) |
 | `container_md5` different from the real one | error (and the `expect` checks are skipped: they mean nothing there) |
 | Table without declared geometry | **warning** for byte edits; **error** for text edits (a text table is required) |
 | `confidence: guess` | **warning** |
@@ -252,7 +331,7 @@ without a schema, or `requires`/`files` (only their shape).
 
 ---
 
-## 7. The three complete examples
+## 7. The four complete examples
 
 They live in `ejemplos/` and are validated by `tests/test_mod_validate.py`. The transcripts below
 are literal: the CLI prints its human output in Spanish today, so the lines are quoted as they come
@@ -400,6 +479,73 @@ first two and the last are shown; the repository file has all 12.
 but it does not go unnoticed. The dry run reports `diff: 12 tramo(s), 19 byte(s)` inside `#983`,
 all of them inside the offsets the manifest declares.
 
+### 7.4 Renaming an existing text — `ejemplos/renombrar-texto/mod.json`
+
+The case the format was missing: the block is **not** empty, so the mod has to prove *which* block
+it is editing. It does so with `expect_sha256` (the digest of the six slots, §3.1) and never writes
+the current text down. `4f1bac…b5813` is abbreviated here; the repository file has the 64
+characters, and the value written is a marker, not game content.
+
+```json
+{
+  "mod_format": 1,
+  "name": "ejemplo-renombrar-texto",
+  "version": "0.1.0",
+  "authors": ["worker (tarjeta t_ca5be1e2)"],
+  "description": "Ejemplo: sustituye un texto que YA existe usando expect_sha256 (sha256 del bloque de 6 slots) en vez del texto en claro. El valor escrito es un marcador inventado, no contenido del juego.",
+  "game": {
+    "title": "pokopia",
+    "version": "2.0.1a",
+    "container_md5": {
+      "LD_C0_R.BIN": "358a672d506ce2b0399149ede64a6760",
+      "LI_C0_R.IDX": "7e056a097f28a62f002ad961a611edf8"
+    }
+  },
+  "requires": [],
+  "edits": [],
+  "text": [
+    {
+      "table": 4650, "id": 5, "slot": 0,
+      "expect_sha256": "4f1bac…b5813", "value": "MOD-RENOMBRA-1",
+      "why": "slot 0 (singular) del bloque 6*(id-4); el expect_sha256 identifica el bloque de este build sin escribir su contenido (criterio en docs/MOD-FORMAT.md 3.1)",
+      "confidence": "verified"
+    },
+    {
+      "table": 4650, "id": 5, "slot": 2,
+      "expect_sha256": "4f1bac…b5813", "value": "MOD-RENOMBRA-2",
+      "why": "slot 2 (plural) del MISMO bloque: el hash es el del bloque tal como esta en el contenedor antes del mod, no el que deja la edicion del slot 0 (docs/MOD-FORMAT.md 3.1)",
+      "confidence": "verified"
+    }
+  ],
+  "files": []
+}
+```
+
+Transcript of the rehearsal against the working copy:
+
+```
+mod: ejemplo-renombrar-texto@0.1.0
+contenedor: build/copia   [dry-run]
+md5 antes : BIN 358a672d506ce2b0399149ede64a6760  IDX 7e056a097f28a62f002ad961a611edf8
+tabla #4650: 298584 -> 298577 B  flag=1 blockSize=0x10000
+  slots totales: 18003 -> 18003; cambios:
+    slot 6  17 B -> 14 B  nuevo='MOD-RENOMBRA-1'
+    slot 8  18 B -> 14 B  nuevo='MOD-RENOMBRA-2'
+  reempaquetado: ok  prefijo de texto identico: True
+  dry-run: no se ha escrito nada
+resultado: OK
+```
+
+`6 = 6*(5-4)` and `8 = 6*(5-4)+2`: the mod edits the singular **and** the plural of the same block.
+Both hashes are the same digest because the reference is the pristine block, not the one left by the
+previous edit (§3.1); the pool shrinks by 7 bytes and no other slot moves out of place. With a hash
+that does not match the build, the mod is rejected with lengths and hashes only:
+
+```
+[ERROR] text[0] #4650 id 5 slot 0: esperaba el bloque con sha256 000…000 y encontre otro
+        (70 B en 6 slots, sha256 4f1bac17691a)
+```
+
 ---
 
 ## 8. Exit codes and messages
@@ -431,6 +577,10 @@ They have been noted in the architecture document as well:
 4. **`merge` with an exact overlap is a conflict even when the values match** (§4.4 said "those
    that touch the same row, conflict"; made concrete: the same row with disjoint ranges is allowed
    with a warning, the same offset or overlapping ranges are not).
+5. **`text[]` carries `expect_sha256` as the publishable alternative to `expect`** (§3.1). §4 only
+   knows the clear text; a manifest with the text in it cannot be published without carrying game
+   content, so the identity of the block travels as a hash instead. Exactly one of the two fields,
+   never both.
 
 ---
 
@@ -442,6 +592,8 @@ They have been noted in the architecture document as well:
 * **It does not touch the save** (`pkp save` is a separate command) nor models/assets.
 * **The files of `files[]` are not installed**: their shape is checked, they are not copied.
 * **`requires` is not resolved.**
+* **`expect_sha256` identifies, it does not encrypt.** A hash keeps the text out of the manifest and
+  out of the error messages; a short string can still be guessed from its hash with a dictionary.
 * Validation does not run the game: a mod can be valid under this contract and still not please the
   engine. The format guarantees what it guarantees: declared bytes, checked `expect` and a
   re-readable container.

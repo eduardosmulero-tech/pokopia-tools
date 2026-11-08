@@ -11,6 +11,9 @@ Comandos implementados aqui:
     pkp mod validate <carpeta>
     pkp mod merge <a> <b> [-o <dir>]
     pkp mod apply <carpeta> [--dry-run | --yes]
+    pkp fdata list|stat|extract <ruta> [--type kidsobjdb]
+    pkp catalog list [--prefix BP|PM|BI|PC|AP]
+    pkp catalog find <texto>
 
 Todos los comandos que escriben tienen `--dry-run` por defecto y ninguno escribe
 en el dump original.
@@ -22,9 +25,10 @@ import argparse
 import hashlib
 import json
 import os
+import struct
 import sys
 
-from . import paths, tables
+from . import paths, tables, fdata, catalog, objdb, texcmd, g1t, anim, snd
 from .container import (
     DEFAULT_BLOCK_SIZE,
     entry_block_size,
@@ -187,10 +191,10 @@ def cmd_row(args) -> int:
         slots, terminated = tables.parse_pool(spec, blob)
         out(sys.stdout, "#%d textos %s: count %d, pool en %d, %d slots (terminado=%s)"
             % (args.table, spec.language, count, spec.pool_start, len(slots), terminated))
-        base = tables.SLOTS_PER_BLOCK * (args.row - tables.TEXT_FIRST_ID)
         if not tables.TEXT_FIRST_ID <= args.row <= count + 3:
             raise UsageError("id de texto %d fuera de rango (%d..%d)"
                              % (args.row, tables.TEXT_FIRST_ID, count + 3), code="usage")
+        base = tables.SLOTS_PER_BLOCK * (args.row - tables.TEXT_FIRST_ID)
         out(sys.stdout, "id %d -> slots %d..%d del bloque" % (args.row, base, base + 5))
         for slot in range(6):
             ordinal = base + slot
@@ -200,6 +204,11 @@ def cmd_row(args) -> int:
             data = slots[ordinal]
             out(sys.stdout, "  +%d  %d B  sha256 %s" % (slot, len(data),
                                                         hashlib.sha256(data).hexdigest()[:12]))
+        bloque = tables.block_slots(spec, slots, args.row)
+        out(sys.stdout, "  bloque  %d B en %d slots  sha256 %s"
+            % (len(b"".join(bloque)), len(bloque),
+               tables.block_sha256(spec, slots, args.row)))
+        out(sys.stdout, "  ^ este es el valor de 'expect_sha256' (docs/MOD-FORMAT.md §3.1)")
         return EXIT_OK
     data = tables.read_row(spec, blob, args.row)
     out(sys.stdout, "#%d fila %d de %d (stride %d, confianza %s)"
@@ -556,6 +565,755 @@ def cmd_progress(args) -> int:
 
 
 
+def cmd_fdata_list(args) -> int:
+    rutas = fdata.find_fdata(args.path)
+    documento = {
+        "path": os.path.abspath(args.path),
+        "files": [{"file": os.path.abspath(r),
+                   "entries": [e.as_dict() for e in fdata.iter_entries(r)]}
+                  for r in rutas],
+    }
+    if args.json:
+        json.dump(documento, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    for fichero in documento["files"]:
+        entradas = fichero["entries"]
+        out(sys.stdout, "%s  %d B  %d entradas"
+            % (fichero["file"], os.path.getsize(fichero["file"]), len(entradas)))
+        out(sys.stdout, "  %-10s %-11s %10s %10s %12s %10s %10s"
+            % ("offset", "tipo", "entry", "comprim.", "sin comprim.", "name_hash", "flags"))
+        for e in entradas:
+            out(sys.stdout, "  0x%08x %-11s %10d %10d %12d %10s 0x%08x"
+                % (e["offset"], e["type"], e["entry_size"], e["compressed_size"],
+                   e["uncompressed_size"], e["name_hash"], e["flags"]))
+    return EXIT_OK
+
+
+def cmd_fdata_stat(args) -> int:
+    rutas = fdata.find_fdata(args.dir)
+    resultado = fdata.scan(rutas, root=os.path.abspath(args.dir))
+    if args.json:
+        json.dump(resultado.as_dict(), sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "romfs     : %s" % resultado.root)
+    out(sys.stdout, "ficheros  : %d .fdata, %d B" % (len(resultado.files), resultado.total_size))
+    out(sys.stdout, "entradas  : %d" % resultado.total_entries)
+    out(sys.stdout, "  %-12s %-10s %9s %11s %16s"
+        % ("tipo", "type_ktid", "entradas", "comprim.", "B sin comprimir"))
+    for t in resultado.types:
+        out(sys.stdout, "  %-12s 0x%08x %9d %11d %16d"
+            % (t.name, t.ktid, t.entries, t.compressed, t.uncompressed_bytes))
+    return EXIT_OK
+
+
+def cmd_fdata_extract(args) -> int:
+    wanted = fdata.parse_type(args.type)
+    rutas = fdata.find_fdata(args.path)
+    escritos = []
+    for ruta in rutas:
+        for entry, destino in fdata.extract(ruta, wanted, args.out):
+            escritos.append((ruta, entry, destino))
+    if args.json:
+        json.dump({
+            "out": os.path.abspath(args.out),
+            "type": fdata.type_name(wanted),
+            "type_ktid": "0x%08x" % wanted,
+            "files": [{"fdata": os.path.abspath(r),
+                       "entry": e.as_dict(),
+                       "written": os.path.abspath(d),
+                       "size": os.path.getsize(d)} for r, e, d in escritos],
+        }, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "%s (0x%08x): %d entradas escritas en %s"
+        % (fdata.type_name(wanted), wanted, len(escritos), os.path.abspath(args.out)))
+    for ruta, entry, destino in escritos:
+        out(sys.stdout, "  0x%08x  %10d B  %s  (desde 0x%x de %s)"
+            % (entry.name_hash, os.path.getsize(destino), os.path.basename(destino),
+               entry.offset, os.path.basename(ruta)))
+    return EXIT_OK
+
+
+def _anim_fuente(args):
+    """`(etiqueta, animacion, bytes)` de los argumentos comunes de `pkp anim`."""
+    return anim.load(args.ruta, args.hash)
+
+
+def _anim_rows_from_fdata(ruta: str, *, deep: bool, limite: int | None):
+    """Una fila por animacion de un `.fdata`, con cabecera o con parseo entero.
+
+    Las entradas que no son `G2A` (29 de las 17.457 son `G1A_` del formato
+    anterior) salen con `format` y `error`, sin tumbar el listado.
+    """
+    for n, entry in enumerate(anim.source.iter_fdata_entries(ruta)):
+        if limite is not None and n >= limite:
+            return
+        if deep:
+            datos = anim.source.read_entry(ruta, entry)
+        else:
+            datos = anim.source.read_entry(ruta, entry, limit=anim.g2a.HEADER_SIZE)
+        fila = {"name_hash": "0x%08x" % entry.name_hash,
+                "bytes": entry.uncompressed_size,
+                "fdata": os.path.basename(ruta)}
+        try:
+            cabecera = anim.peek(datos)
+        except anim.AnimError as exc:
+            magic = struct.unpack_from("<I", datos, 0)[0]
+            fila.update({"parseable": False, "error": str(exc),
+                         "format": {anim.g2a.MAGIC_G1A: "G1A_",
+                                    anim.g2a.MAGIC: "G2A_"}.get(
+                                        magic, "0x%08x" % magic),
+                         "version": datos[4:8].decode("ascii", "replace"),
+                         "frame_rate": None, "length_frames": None,
+                         "duration_s": None, "bone_count": None})
+            yield fila
+            continue
+        fila.update(cabecera.as_dict())
+        fila["parseable"] = True
+        fila["format"] = "G2A_"
+        if deep:
+            a = anim.parse(datos)
+            fila.update({"splines": a.spline_count, "keyframes": a.keyframe_count,
+                         "used_blocks": a.used_blocks,
+                         "pad_bytes": len(a.pad_bytes)})
+        yield fila
+
+
+def cmd_anim_list(args) -> int:
+    filas: list[dict] = []
+    if anim.source.es_fdata(args.ruta):
+        filas = list(_anim_rows_from_fdata(args.ruta, deep=args.deep,
+                                           limite=args.limit))
+    else:
+        for ruta in anim.source.iter_files(args.ruta):
+            with open(ruta, "rb") as fh:
+                datos = fh.read(None if args.deep else anim.g2a.HEADER_SIZE)
+            cabecera = anim.peek(datos)
+            fila = {"name_hash": os.path.basename(ruta), "bytes": os.path.getsize(ruta),
+                    "fdata": "-"}
+            fila.update(cabecera.as_dict())
+            if args.deep:
+                with open(ruta, "rb") as fh:
+                    a = anim.parse(fh.read())
+                fila.update({"splines": a.spline_count, "keyframes": a.keyframe_count,
+                             "used_blocks": a.used_blocks,
+                             "pad_bytes": len(a.pad_bytes)})
+            filas.append(fila)
+            if args.limit and len(filas) >= args.limit:
+                break
+    for fila in filas:
+        fila["magic"] = "G2A_"
+    if args.json:
+        json.dump({"path": os.path.abspath(args.ruta), "count": len(filas),
+                   "deep": bool(args.deep), "animations": filas},
+                  sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "%s: %d animaciones" % (os.path.abspath(args.ruta), len(filas)))
+    cabecera = "%-12s %9s %6s %6s %8s %6s"
+    if args.deep:
+        cabecera += " %7s %9s %6s"
+    cabecera += "  %s"
+    columnas = ("name", "bytes", "fps", "frames", "dur_s", "bones")
+    if args.deep:
+        columnas += ("splines", "claves", "bloques")
+    columnas += ("fdata",)
+    out(sys.stdout, cabecera % columnas)
+    for fila in filas:
+        if not fila.get("parseable", True):
+            out(sys.stdout, "%-12s %9d %6s %6s  NO SOPORTADO (formato anterior)"
+                % (fila["name_hash"], fila["bytes"], fila["format"],
+                   fila["version"]))
+            continue
+        linea = "%-12s %9d %6.1f %6d %8.3f %6d" % (
+            fila["name_hash"], fila["bytes"], fila["frame_rate"],
+            fila["length_frames"], fila["duration_s"], fila["bone_count"])
+        if args.deep:
+            linea += " %7d %9d %6d" % (fila["splines"], fila["keyframes"],
+                                       fila["used_blocks"])
+        linea += "  %s" % fila["fdata"]
+        out(sys.stdout, linea)
+    return EXIT_OK
+
+
+def cmd_anim_info(args) -> int:
+    etiqueta, a, datos = _anim_fuente(args)
+    reescrito = anim.build(a)
+    doc = {
+        "name": etiqueta,
+        "size": len(datos),
+        "sha256": hashlib.sha256(datos).hexdigest(),
+        "header": anim.peek(datos).as_dict(),
+        "summary": a.as_dict(),
+        "reserved": a.reserved,
+        "nonzero_pad_bytes": len(a.pad_bytes),
+        "rewrite_identical": reescrito == datos,
+        "rewrite_sha256": hashlib.sha256(reescrito).hexdigest(),
+        "bones": [
+            {"bone_id": hueso.bone_id, "bone_id_raw": hueso.bone_id_raw,
+             "timing_offset": hueso.timing_offset,
+             "splines": [{"opcode": s.opcode, "channel": s.channel,
+                          "keyframes": s.keyframe_count,
+                          "timings": list(s.timings),
+                          "first_data_index": s.first_data_index}
+                         for s in hueso.splines]}
+            for hueso in a.bones],
+    }
+    if args.bone is not None:
+        doc["bones"] = [b for b in doc["bones"] if b["bone_id"] == args.bone]
+        if not doc["bones"]:
+            raise anim.AnimError("no hay hueso con id %d" % args.bone)
+    if args.json:
+        json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    cab = doc["header"]
+    out(sys.stdout, "%s  %d B  sha256 %s" % (etiqueta, len(datos),
+                                             doc["sha256"][:16] + "..."))
+    out(sys.stdout, "  magic          G2A_ (en disco b\"_A2G\", u32 LE 0x4732415f)")
+    out(sys.stdout, "  version        %s" % cab["version"])
+    out(sys.stdout, "  fileSize       %d" % cab["file_size"])
+    out(sys.stdout, "  frameRate      %g  (%d frames = %.3f s)"
+        % (cab["frame_rate"], cab["length_frames"], cab["duration_s"]))
+    out(sys.stdout, "  boneSection    %d B (%d huesos)"
+        % (cab["bone_section_size"], cab["bone_count"]))
+    out(sys.stdout, "  timingSection  %d B" % cab["timing_size"])
+    out(sys.stdout, "  keyBlocks      %d x 32 B = %d B"
+        % (cab["key_block_count"], cab["key_block_count"] * 32))
+    out(sys.stdout, "  reserved       %d" % cab["reserved"])
+    out(sys.stdout, "  geometria      0x20 + %d + %d + %d = %d  (fichero %d)  %s"
+        % (cab["bone_section_size"], cab["timing_size"],
+           cab["key_block_count"] * 32, cab["computed_size"], len(datos),
+           "OK" if cab["computed_size"] == len(datos) else "NO CUADRA"))
+    out(sys.stdout, "  canales        %s" % ", ".join(
+        "%s %d" % (k, v) for k, v in doc["summary"]["channels"].items()))
+    out(sys.stdout, "  splines        %d   claves totales %d   bloques usados %d/%d"
+        % (doc["summary"]["splines"], doc["summary"]["keyframes"],
+           doc["summary"]["used_blocks"], cab["key_block_count"]))
+    out(sys.stdout, "  relleno no 0   %d registros" % doc["nonzero_pad_bytes"])
+    out(sys.stdout, "  reescritura    %s  sha256 %s"
+        % ("IDENTICA" if doc["rewrite_identical"] else "DISTINTA",
+           doc["rewrite_sha256"][:16] + "..."))
+    out(sys.stdout, "  huesos (id, splines, claves por canal):")
+    for hueso in doc["bones"][:args.bones]:
+        detalle = "  ".join("%s %d" % (s["channel"][:4], s["keyframes"])
+                            for s in hueso["splines"])
+        out(sys.stdout, "    %5d  %d  %s" % (hueso["bone_id"], len(hueso["splines"]),
+                                             detalle))
+    if len(doc["bones"]) > args.bones:
+        out(sys.stdout, "    ... %d huesos mas (--json para todos)"
+            % (len(doc["bones"]) - args.bones))
+    return EXIT_OK
+
+
+def cmd_anim_export(args) -> int:
+    etiqueta, a, datos = _anim_fuente(args)
+    formato = args.format
+    if formato == "auto":
+        formato = "csv" if args.out.lower().endswith(".csv") else "json"
+    paths.guard_writable(args.out)
+    if formato == "csv":
+        filas = anim.write_csv(a, args.out)
+        if args.json:
+            json.dump({"out": os.path.abspath(args.out), "format": "csv",
+                       "rows": filas, "summary": a.as_dict()},
+                      sys.stdout, indent=2, ensure_ascii=False)
+            out(sys.stdout)
+            return EXIT_OK
+        out(sys.stdout, "%s -> %s (csv, %d filas)" % (etiqueta, args.out, filas))
+        return EXIT_OK
+    doc = anim.to_json(a, name=etiqueta, size=len(datos),
+                       sha256=hashlib.sha256(datos).hexdigest())
+    anim.write_json(doc, args.out)
+    if args.json:
+        json.dump({"out": os.path.abspath(args.out), "format": "json",
+                   "summary": a.as_dict()}, sys.stdout, indent=2,
+                  ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "%s -> %s (json sin perdida: %d huesos, %d bloques)"
+        % (etiqueta, args.out, a.bone_count, len(a.key_blocks)))
+    return EXIT_OK
+
+
+def cmd_anim_build(args) -> int:
+    doc = anim.read_json(args.documento)
+    a = anim.from_json(doc)
+    datos = anim.build(a)
+    paths.guard_writable(args.out)
+    with open(args.out, "wb") as fh:
+        fh.write(datos)
+    original = doc.get("source", {}).get("sha256")
+    nuevo = hashlib.sha256(datos).hexdigest()
+    identico = original == nuevo if original else None
+    if args.json:
+        json.dump({"out": os.path.abspath(args.out), "size": len(datos),
+                   "sha256": nuevo, "source_sha256": original,
+                   "identical": identico, "summary": a.as_dict()},
+                  sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "%s -> %s  %d B  sha256 %s" % (args.documento, args.out,
+                                                   len(datos), nuevo))
+    out(sys.stdout, "  origen declarado %s   %s"
+        % (original or "(no consta)",
+           "IDENTICO" if identico else ("DISTINTO" if identico is False else "")))
+    return EXIT_OK
+
+
+def cmd_anim_roundtrip(args) -> int:
+    etiqueta, a, datos = _anim_fuente(args)
+    reescrito = anim.build(a)
+    if args.out:
+        paths.guard_writable(args.out)
+        with open(args.out, "wb") as fh:
+            fh.write(reescrito)
+    antes = hashlib.sha256(datos).hexdigest()
+    despues = hashlib.sha256(reescrito).hexdigest()
+    doc = {"name": etiqueta, "size": len(datos), "size_rewritten": len(reescrito),
+           "sha256": antes, "sha256_rewritten": despues,
+           "identical": datos == reescrito, "out": os.path.abspath(args.out)
+           if args.out else None, "summary": a.as_dict()}
+    if args.json:
+        json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "%s  %d B" % (etiqueta, len(datos)))
+    out(sys.stdout, "  sha256 original  %s" % antes)
+    out(sys.stdout, "  sha256 reescrito %s" % despues)
+    out(sys.stdout, "  %s%s" % ("IDENTICO byte a byte" if doc["identical"]
+                                else "DISTINTO",
+                                " (%s)" % args.out if args.out else ""))
+    return EXIT_OK
+
+
+def cmd_anim_set(args) -> int:
+    etiqueta, a, datos = _anim_fuente(args)
+    if not anim.source.es_fdata(args.ruta):
+        # cambiar un valor no puede tocar el fichero de entrada
+        paths.guard_writable(args.ruta)
+    parte = anim.set_keyframe_value(a, bone_id=args.bone, channel=args.channel,
+                                    frame=args.frame, axis=args.axis,
+                                    value=args.value)
+    reescrito = anim.build(a)
+    paths.guard_writable(args.out)
+    with open(args.out, "wb") as fh:
+        fh.write(reescrito)
+    # relectura desde disco: el valor cambiado y nada mas
+    with open(args.out, "rb") as fh:
+        verificado = anim.parse(fh.read())
+    hueso = verificado.bone_by_id(args.bone)
+    spline = next(s for s in hueso.splines if s.channel == args.channel)
+    vuelta = {"x": 0, "y": 1, "z": 2}[args.axis]
+    fila = spline.keys[spline.timings.index(args.frame)].rows[0].vector
+    doc = {
+        "name": etiqueta, "out": os.path.abspath(args.out), "change": parte,
+        "size_before": len(datos), "size_after": len(reescrito),
+        "sha256_before": hashlib.sha256(datos).hexdigest(),
+        "sha256_after": hashlib.sha256(reescrito).hexdigest(),
+        "readback": {"x": fila[0], "y": fila[1], "z": fila[2]},
+        "readback_axis": fila[vuelta],
+        "same_size": len(datos) == len(reescrito),
+        "valid_after": True,
+    }
+    if args.json:
+        json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "%s  ->  %s" % (etiqueta, args.out))
+    out(sys.stdout, "  cambiado hueso %d, canal %s, frame %d, eje %s: %g -> %g"
+        % (parte["bone_id"], parte["channel"], parte["frame"], parte["axis"],
+           parte["before"], parte["after"]))
+    out(sys.stdout, "  pedido %g, leido de vuelta %g (campo de 20 bits, exp %d)"
+        % (parte["requested"], doc["readback_axis"],
+           anim.g2a.Row.from_int(parte["row_after"]).exp))
+    out(sys.stdout, "  int64 fila c0  0x%016x -> 0x%016x"
+        % (parte["row_before"] & 0xFFFFFFFFFFFFFFFF,
+           parte["row_after"] & 0xFFFFFFFFFFFFFFFF))
+    out(sys.stdout, "  tamano %d -> %d   %s" % (len(datos), len(reescrito),
+                                                 "igual" if doc["same_size"] else "DISTINTO"))
+    out(sys.stdout, "  fichero releido y valido: %d huesos" % verificado.bone_count)
+    return EXIT_OK
+
+
+def _catalog(args):
+    """Catalogo del romfs: `--container` manda sobre `PKP_ROMFS`/`./romfs`."""
+    from . import catalog as catmod
+
+    return catmod.load(args.container or paths.configured_romfs())
+
+
+def _catalog_entries(cat, nombres) -> list[dict]:
+    return [{"name": n, "hash": "0x%08X" % cat.hashes[n]} for n in nombres]
+
+
+def cmd_catalog_list(args) -> int:
+    """Una linea por entidad en stdout; el resumen va a stderr.
+
+    Asi `pkp catalog list | wc -l` da el recuento exacto y el resumen no
+    ensucia la salida que se quiera comparar o volcar a un fichero.
+    """
+    cat = _catalog(args)
+    nombres = cat.names_with_prefix(args.prefix)
+    if args.json:
+        doc = cat.as_dict()
+        doc.update({"count": len(nombres), "prefix": args.prefix,
+                    "entries": _catalog_entries(cat, nombres)})
+        json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    for nombre in nombres:
+        out(sys.stdout, "0x%08X  %s" % (cat.hashes[nombre], nombre))
+    reparto = ", ".join("%s %d" % (p, n) for p, n in
+                        sorted(cat.by_prefix.items(), key=lambda kv: -kv[1]))
+    out(sys.stderr, "# %d entidades%s de %s"
+        % (len(nombres), " con prefijo %s" % args.prefix if args.prefix else "",
+           os.path.basename(cat.source)))
+    out(sys.stderr, "# reparto: %s" % reparto)
+    return EXIT_OK
+
+
+def cmd_catalog_find(args) -> int:
+    cat = _catalog(args)
+    nombres = cat.find(args.text)
+    if args.json:
+        doc = cat.as_dict()
+        doc.update({"query": args.text, "count": len(nombres),
+                    "entries": _catalog_entries(cat, nombres)})
+        json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    for nombre in nombres:
+        out(sys.stdout, "0x%08X  %s" % (cat.hashes[nombre], nombre))
+    out(sys.stderr, "# %d de %d entidades contienen %r (sin distinguir mayusculas)"
+        % (len(nombres), len(cat.names), args.text))
+    return EXIT_OK if nombres else EXIT_INVALID
+
+
+def _parse_type_hash(arg: str) -> int:
+    """`--type` de `pkp objdb`: un `type_hash` en hex, con o sin `0x`."""
+    texto = arg.strip()
+    try:
+        valor = int(texto[2:] if texto.lower().startswith("0x") else texto, 16)
+    except ValueError:
+        raise UsageError(
+            "--type espera un type_hash en hex, no %r\n"
+            "  ejemplo: --type 0x18eb1e56 (los valores salen de `pkp objdb stat`)"
+            % arg, code="usage") from None
+    if not 0 <= valor <= 0xFFFFFFFF:
+        raise UsageError("--type %r se sale de 32 bits" % arg, code="usage")
+    return valor
+
+
+def _record_lines(record, cabecera: str) -> list[str]:
+    """Un registro en texto: cabecera y un renglon por par con sus valores."""
+    lineas = ["%s id %d  type_hash 0x%08x  offset 0x%08x  %d B  %d pares"
+              % (cabecera, record.id, record.type_hash, record.offset,
+                 record.size, record.n_pairs)]
+    for par in record.pairs:
+        valores = " ".join("0x%08x" % v for v in par.values) or "(sin valor)"
+        lineas.append("    0x%08x  kind %d  %2d valores: %s"
+                      % (par.hash, par.kind, par.n_values, valores))
+    return lineas
+
+
+def cmd_objdb_stat(args) -> int:
+    db = objdb.load(args.romfs)
+    if args.json:
+        json.dump(db.as_dict(), sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    fuente = db.origin or "?"
+    out(sys.stdout, "romfs     : %s" % os.path.abspath(args.romfs))
+    out(sys.stdout, "fichero   : %s" % fuente)
+    if db.source_entry is not None:
+        out(sys.stdout, "            kidsobjdb name_hash 0x%08x  %d B comprimidos"
+            % (db.source_entry.name_hash, db.source_entry.compressed_size))
+    out(sys.stdout, "cabecera  : %r  %d B  registro %d B  declarados %d"
+        % (objdb.FILE_MAGIC, db.header_size, db.record_header_size, db.declared_count))
+    out(sys.stdout, "registros : %d" % db.count)
+    out(sys.stdout, "pares     : %d  (tríos kind/hash/valores)" % db.pair_count)
+    out(sys.stdout, "type_hash : %d distintos" % len(db.by_type))
+    out(sys.stdout, "por tamaño de registro:")
+    for fila in db.by_size:
+        out(sys.stdout, "  %4d B  %8d" % (fila.size, fila.records))
+    tope = 20
+    out(sys.stdout, "por type_hash (top %d de %d):" % (min(tope, len(db.by_type)),
+                                                       len(db.by_type)))
+    for fila in db.by_type[:tope]:
+        out(sys.stdout, "  0x%08x  %8d" % (fila.type_hash, fila.records))
+    cola = db.by_type[tope:]
+    if cola:
+        out(sys.stdout, "  cola: %d type_hash con %d registros (%d..%d por tipo)"
+            % (len(cola), sum(c.records for c in cola),
+               cola[-1].records, cola[0].records))
+    return EXIT_OK
+
+
+def cmd_objdb_dump(args) -> int:
+    if args.limit < 0:
+        raise UsageError("--limit no puede ser negativo (%d)" % args.limit, code="usage")
+    wanted = _parse_type_hash(args.type)
+    db = objdb.load(args.romfs)
+    total = sum(t.records for t in db.by_type if t.type_hash == wanted)
+    if total == 0:
+        out(sys.stderr, "ERROR: ningun registro con type_hash 0x%08x en %s"
+            % (wanted, db.origin or args.romfs))
+        return EXIT_INVALID
+    limite = args.limit or total
+    vistos = []
+    for record in db.records_of(wanted):
+        if len(vistos) >= limite:
+            break
+        vistos.append(record)
+    if args.json:
+        json.dump({
+            "type_hash": "0x%08x" % wanted,
+            "total": total,
+            "shown": len(vistos),
+            "records": [r.as_dict() for r in vistos],
+        }, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "0x%08x: %d registros, mostrando %d" % (wanted, total, len(vistos)))
+    for i, record in enumerate(vistos):
+        for linea in _record_lines(record, "[%d]" % i):
+            out(sys.stdout, linea)
+    return EXIT_OK
+
+
+def cmd_objdb_id(args) -> int:
+    db = objdb.load(args.romfs)
+    record = db.find(args.id)
+    if args.json:
+        json.dump({"id": args.id, "found": record is not None,
+                   "record": record.as_dict() if record else None},
+                  sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK if record is not None else EXIT_INVALID
+    if record is None:
+        out(sys.stderr, "ERROR: ningun registro con id %d en %s"
+            % (args.id, db.origin or args.romfs))
+        return EXIT_INVALID
+    for linea in _record_lines(record, "registro"):
+        out(sys.stdout, linea)
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------
+# Sonido: bancos ASRS/KTSR de los `.srsa`
+# --------------------------------------------------------------------------
+
+def _snd_line(stream) -> str:
+    return ("#%-4d %-8s %3d ch %6d Hz %9d muestras %7.3f s  %10d B  id %-10d %s"
+            % (stream.index, stream.codec, stream.channels, stream.sample_rate,
+               stream.num_samples, stream.duration, stream.data_size,
+               stream.sound_id, stream.name))
+
+
+def cmd_snd_list(args) -> int:
+    banco, _ = snd.read_bank(args.bank)
+    if args.json:
+        doc = banco.as_dict()
+        doc.update({"codecs": banco.codecs,
+                    "streams": [s.as_dict() for s in banco.streams]})
+        json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "%s  %d B  audio_id 0x%08x  %d chunks  %d streams  %s"
+        % (os.path.abspath(args.bank), banco.size, banco.audio_id,
+           len(banco.chunks), len(banco.streams), banco.codecs))
+    for stream in banco.streams:
+        out(sys.stdout, _snd_line(stream))
+    return EXIT_OK
+
+
+def cmd_snd_extract(args) -> int:
+    escritos = snd.extract(args.bank, args.out, args.stream or None)
+    if args.json:
+        json.dump({
+            "bank": os.path.abspath(args.bank),
+            "out": os.path.abspath(args.out),
+            "files": [{"stream": s.as_dict(), "written": os.path.abspath(p),
+                       "size": os.path.getsize(p),
+                       "sha256": paths.sha256_file(p)} for s, p in escritos],
+        }, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "%d streams escritos en %s"
+        % (len(escritos), os.path.abspath(args.out)))
+    for stream, destino in escritos:
+        out(sys.stdout, "  %s  %10d B  %s"
+            % (os.path.basename(destino), os.path.getsize(destino), stream.name))
+    return EXIT_OK
+
+
+def cmd_snd_replace(args) -> int:
+    if args.swap and (args.stream or args.file):
+        out(sys.stderr, "ERROR: --swap no se combina con --stream/--file")
+        return EXIT_USAGE
+    if not args.swap and not (args.stream and args.file):
+        out(sys.stderr,
+            "ERROR: falta la sustitucion: --swap A B, o --stream N --file <flujo>")
+        return EXIT_USAGE
+    destino = args.out or args.bank
+    if destino == args.bank and not args.in_place:
+        out(sys.stderr,
+            "ERROR: para escribir sobre el propio banco hace falta --in-place\n"
+            "  (deja una copia <banco>.orig la primera vez); si no, usa -o <salida>")
+        return EXIT_USAGE
+    banco, data = snd.read_bank(args.bank)
+    antes = paths.sha256_file(args.bank)
+
+    if args.swap:
+        modificado = snd.swap_streams(data, args.swap[0], args.swap[1])
+        detalle = {"swap": list(args.swap)}
+    else:
+        with open(args.file, "rb") as fh:
+            nuevo = fh.read()
+        donor = None
+        if (args.from_banco is None) != (args.from_stream is None):
+            out(sys.stderr, "ERROR: --from-banco y --from-stream van juntos")
+            return EXIT_USAGE
+        if args.from_banco is not None:
+            origen, origen_data = snd.read_bank(args.from_banco)
+            donor = (origen_data, origen.stream(args.from_stream))
+        modificado = snd.replace_stream(data, args.stream, nuevo, donor)
+        detalle = {"stream": args.stream, "bytes": len(nuevo),
+                   "donor": args.from_banco, "donor_stream": args.from_stream}
+
+    snd.write_bank(destino, modificado)
+    despues = paths.sha256_file(destino)
+    verificado = snd.parse(modificado)
+    if args.json:
+        doc = {"source": os.path.abspath(args.bank), "written": os.path.abspath(destino),
+               "sha256_before": antes, "sha256_after": despues,
+               "size_before": len(data), "size_after": len(modificado),
+               "streams_before": len(banco.streams),
+               "streams_after": len(verificado.streams),
+               "backup": destino + ".orig" if os.path.exists(destino + ".orig") else None}
+        doc.update(detalle)
+        json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "escrito   : %s" % os.path.abspath(destino))
+    out(sys.stdout, "sha256    : %s" % antes)
+    out(sys.stdout, "         -> %s" % despues)
+    out(sys.stdout, "tamano    : %d -> %d B" % (len(data), len(modificado)))
+    out(sys.stdout, "streams   : %d (el banco modificado vuelve a analizarse)" % len(verificado.streams))
+    if os.path.exists(destino + ".orig"):
+        out(sys.stdout, "original  : %s" % (destino + ".orig"))
+    return EXIT_OK
+
+
+def cmd_snd_import(args) -> int:
+    """Mete un WAV propio en un stream MS ADPCM (codificado por el kit)."""
+    from . import audio as pkp_audio
+
+    destino = args.out or args.bank
+    if destino == args.bank and not args.in_place:
+        out(sys.stderr,
+            "ERROR: para escribir sobre el propio banco hace falta --in-place\n"
+            "  (deja una copia <banco>.orig la primera vez); si no, usa -o <salida>")
+        return EXIT_USAGE
+    banco, data = snd.read_bank(args.bank)
+    stream = banco.stream(args.stream)
+    antes = paths.sha256_file(args.bank)
+
+    if stream.external:
+        out(sys.stderr, "ERROR: el stream %d es externo: su audio no esta en este banco"
+            % stream.index)
+        return EXIT_INVALID
+    if stream.codec != "msadpcm":
+        out(sys.stderr,
+            "ERROR: el stream %d es %s y solo se puede codificar MS ADPCM.\n"
+            "  De los %d streams con datos dentro del banco, MS ADPCM es el unico\n"
+            "  con codificador; KA1A es un codec de transformada y no hay encoder\n"
+            "  (docs/AUDIO-PROPIO.md)."
+            % (stream.index, stream.codec, len(banco.streams)))
+        return EXIT_INVALID
+
+    bloque = snd.msadpcm_block_size(data, stream)
+    muestras, rate, canales = pkp_audio.read_wav(args.wav)
+    if canales != 1:
+        out(sys.stderr,
+            "ERROR: %s tiene %d canales y los streams del banco son mono;\n"
+            "  exporta el canal que quieras con `ffmpeg -ac 1`" % (args.wav, canales))
+        return EXIT_USAGE
+    payload = pkp_audio.msadpcm_encode(muestras, bloque)
+    nuevo = snd.StreamAudio(codec="msadpcm", sample_rate=rate,
+                            num_samples=len(muestras), payload=payload,
+                            block_size=bloque, loop_start=args.loop)
+    modificado = snd.set_stream_audio(data, args.stream, nuevo)
+    snd.write_bank(destino, modificado)
+    despues = paths.sha256_file(destino)
+    verificado = snd.parse(modificado)
+    comprobado = verificado.stream(args.stream)
+
+    snr = pkp_audio.msadpcm_snr_db(
+        muestras, pkp_audio.msadpcm_decode(payload, bloque, len(muestras)))
+
+    if args.json:
+        doc = {"source": os.path.abspath(args.bank), "written": os.path.abspath(destino),
+               "sha256_before": antes, "sha256_after": despues,
+               "size_before": len(data), "size_after": len(modificado),
+               "streams_before": len(banco.streams),
+               "streams_after": len(verificado.streams),
+               "wav": os.path.abspath(args.wav),
+               "audio": nuevo.as_dict(),
+               "encoder": "msadpcm propio (bloque %d B)" % bloque,
+               "snr_db": round(snr, 3),
+               "backup": destino + ".orig" if os.path.exists(destino + ".orig") else None}
+        json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "WAV       : %s (%d muestras, %d Hz, %s)"
+        % (os.path.abspath(args.wav), len(muestras), rate,
+           "mono" if canales == 1 else "%d canales" % canales))
+    out(sys.stdout, "codificado: %d B en %d bloques de %d B (SNR ida y vuelta %s)"
+        % (len(payload), len(payload) // bloque, bloque,
+           "%.2f dB" % snr if snr is not None else "n/d"))
+    out(sys.stdout, "stream    : %d  %d Hz, %d muestras, %.3f s, bucle %d"
+        % (comprobado.index, comprobado.sample_rate, comprobado.num_samples,
+           comprobado.duration, comprobado.loop_start))
+    out(sys.stdout, "escrito   : %s" % os.path.abspath(destino))
+    out(sys.stdout, "sha256    : %s" % antes)
+    out(sys.stdout, "         -> %s" % despues)
+    out(sys.stdout, "tamano    : %d -> %d B" % (len(data), len(modificado)))
+    out(sys.stdout, "streams   : %d (el banco modificado vuelve a analizarse)"
+        % len(verificado.streams))
+    if os.path.exists(destino + ".orig"):
+        out(sys.stdout, "original  : %s" % (destino + ".orig"))
+    return EXIT_OK
+
+
+def cmd_snd_stat(args) -> int:
+    rutas = snd.find_banks(args.dir)
+    stats = snd.scan_folder(rutas)
+    if args.json:
+        json.dump(stats.as_dict(), sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "bancos    : %d" % stats.banks)
+    out(sys.stdout, "streams   : %d (%d con datos dentro del banco)"
+        % (stats.streams, stats.internal))
+    out(sys.stdout, "codecs    : %s" % dict(sorted(stats.codecs.items())))
+    out(sys.stdout, "swap      : %d streams internos con otro en su banco (%.1f%%)"
+        % (stats.swappable,
+           100.0 * stats.swappable / stats.internal if stats.internal else 0.0))
+    out(sys.stdout, "mismo tam.: %d comparten (codec, tamano) en su banco; "
+        "%d en todo el arbol (%d grupos)"
+        % (stats.same_size_same_bank, stats.same_size_anywhere,
+           stats.same_size_groups))
+    if stats.problems:
+        out(sys.stdout, "problemas : %d" % len(stats.problems))
+        for problema in stats.problems[:10]:
+            out(sys.stdout, "  " + problema)
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="pkp",
@@ -690,6 +1448,211 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--confidence", action="store_true",
                    help="añade confianza y evidencia de cada cifra")
     p.set_defaults(func=cmd_progress)
+
+    fd = sub.add_parser("fdata", help="contenedores .fdata (PDRK/IDRK): listar, contar y extraer")
+    fdsub = fd.add_subparsers(dest="fdcmd", required=True)
+
+    p = fdsub.add_parser("list", help="cabeceras de todas las entradas de un .fdata",
+                         parents=[common])
+    p.add_argument("path", help="fichero .fdata (o carpeta con varios)")
+    p.set_defaults(func=cmd_fdata_list)
+
+    p = fdsub.add_parser("stat", help="recuento por type_ktid de todos los .fdata",
+                         parents=[common])
+    p.add_argument("dir", help="carpeta romfs (recorre los .fdata de dentro)")
+    p.set_defaults(func=cmd_fdata_stat)
+
+    p = fdsub.add_parser("extract", help="descomprimir las entradas de un tipo a una carpeta",
+                         parents=[common])
+    p.add_argument("path", help="fichero .fdata (o carpeta con varios)")
+    p.add_argument("--type", required=True,
+                   help="tipo de entrada: nombre (kidsobjdb, g1t, ...) o hex 0x20a6a0bb")
+    p.add_argument("--out", required=True, help="carpeta de salida (nunca dentro del romfs)")
+    p.set_defaults(func=cmd_fdata_extract)
+
+    tex = sub.add_parser("tex", help="texturas G1T: listar, censar, sacar a PNG y reinyectar")
+    tsub = tex.add_subparsers(dest="texcmd", required=True)
+
+    p = tsub.add_parser("list", help="texturas de un .g1t o de un .fdata, con geometria",
+                        parents=[common])
+    p.add_argument("path", help="fichero .g1t, .fdata o carpeta con .g1t")
+    p.set_defaults(func=texcmd.cmd_tex_list)
+
+    p = tsub.add_parser("stat", help="censo de formatos de todo el romfs y %% escribible",
+                        parents=[common])
+    p.add_argument("romfs", help="carpeta romfs (recorre los .fdata de dentro)")
+    p.set_defaults(func=texcmd.cmd_tex_stat)
+
+    p = tsub.add_parser("extract", help="textura a PNG (solo el nivel 0, sin perdida)",
+                        parents=[common])
+    p.add_argument("path", help="fichero .g1t o .fdata")
+    p.add_argument("--out", required=True,
+                   help="PNG de salida, o carpeta (termina en separador) para varios")
+    p.add_argument("--index", type=int, default=None, help="que textura del .g1t (por defecto 0)")
+    p.add_argument("--g1t", type=int, default=0, help="que .g1t del .fdata (por defecto 0)")
+    p.add_argument("--all", action="store_true", help="todas las texturas del .g1t")
+    p.set_defaults(func=texcmd.cmd_tex_extract)
+
+    p = tsub.add_parser("inject", help="reinyectar pixeles en un .g1t (mismo tamano)",
+                        parents=[common])
+    p.add_argument("path", help="fichero .g1t o .fdata")
+    p.add_argument("--out", required=True, help="fichero de salida (.g1t)")
+    p.add_argument("--index", type=int, default=None, help="que textura del .g1t (por defecto 0)")
+    p.add_argument("--g1t", type=int, default=0, help="que .g1t del .fdata (por defecto 0)")
+    grupo = p.add_mutually_exclusive_group(required=True)
+    grupo.add_argument("--png", help="PNG con los pixeles nuevos (mismas dimensiones)")
+    grupo.add_argument("--same", action="store_true",
+                       help="reescribir la misma textura sin tocar pixeles (round-trip neutro)")
+    p.set_defaults(func=texcmd.cmd_tex_inject)
+    an = sub.add_parser("anim",
+                        help="animaciones G2A (tipo g1a del .fdata): listar, ver, exportar, reescribir")
+    ansub = an.add_subparsers(dest="animcmd", required=True)
+
+    p = ansub.add_parser("list", help="una linea por animacion (de un .fdata o de una carpeta)",
+                         parents=[common])
+    p.add_argument("ruta", help=".fdata, fichero .g1a/.g2a o carpeta con ellos")
+    p.add_argument("--deep", action="store_true",
+                   help="parsea entera cada animacion (splines, claves, bloques)")
+    p.add_argument("--limit", type=int, default=None,
+                   help="como mucho N animaciones (para probar sin recorrer las 17.457)")
+    p.set_defaults(func=cmd_anim_list)
+
+    p = ansub.add_parser("info", help="cabecera campo a campo, huesos y reescritura",
+                         parents=[common])
+    p.add_argument("ruta", help="fichero .g1a/.g2a, o un .fdata con --hash")
+    p.add_argument("--hash", type=lambda s: int(s, 0), default=None,
+                   help="name_hash de la entrada cuando `ruta` es un .fdata")
+    p.add_argument("--bone", type=int, default=None, help="solo este hueso")
+    p.add_argument("--bones", type=int, default=12,
+                   help="cuantos huesos listar en la salida de texto (12)")
+    p.set_defaults(func=cmd_anim_info)
+
+    p = ansub.add_parser("export", help="volcar a JSON sin perdida o a CSV horneado",
+                         parents=[common])
+    p.add_argument("ruta", help="fichero .g1a/.g2a, o un .fdata con --hash")
+    p.add_argument("--hash", type=lambda s: int(s, 0), default=None,
+                   help="name_hash de la entrada cuando `ruta` es un .fdata")
+    p.add_argument("--out", required=True, help="fichero de salida (.json o .csv)")
+    p.add_argument("--format", choices=("auto", "json", "csv"), default="auto",
+                   help="auto: csv si --out acaba en .csv, si no json")
+    p.set_defaults(func=cmd_anim_export)
+
+    p = ansub.add_parser("build", help="reconstruir el .g1a desde el JSON exportado",
+                         parents=[common])
+    p.add_argument("documento", help="JSON exportado con `pkp anim export --format json`")
+    p.add_argument("--out", required=True, help="fichero .g1a/.g2a de salida")
+    p.set_defaults(func=cmd_anim_build)
+
+    p = ansub.add_parser("roundtrip", help="leer y reescribir, y comparar el sha256",
+                         parents=[common])
+    p.add_argument("ruta", help="fichero .g1a/.g2a, o un .fdata con --hash")
+    p.add_argument("--hash", type=lambda s: int(s, 0), default=None,
+                   help="name_hash de la entrada cuando `ruta` es un .fdata")
+    p.add_argument("--out", default=None, help="opcional: escribir lo reescrito")
+    p.set_defaults(func=cmd_anim_roundtrip)
+
+    p = ansub.add_parser("set", help="cambiar un valor de una clave y reinyectar",
+                         parents=[common])
+    p.add_argument("ruta", help="fichero .g1a/.g2a, o un .fdata con --hash")
+    p.add_argument("--hash", type=lambda s: int(s, 0), default=None,
+                   help="name_hash de la entrada cuando `ruta` es un .fdata")
+    p.add_argument("--bone", type=int, required=True, help="id del hueso")
+    p.add_argument("--channel", required=True, choices=("rotation", "translation", "scale"),
+                   help="canal a tocar")
+    p.add_argument("--frame", type=int, required=True, help="frame de la clave")
+    p.add_argument("--axis", required=True, choices=("x", "y", "z"),
+                   help="componente a cambiar")
+    p.add_argument("--value", type=float, required=True, help="valor nuevo")
+    p.add_argument("--out", required=True, help="fichero de salida (nunca el de entrada)")
+    p.set_defaults(func=cmd_anim_set)
+
+    cat = sub.add_parser("catalog",
+                         help="catalogo de entidades (2.043 nombres) y su hash KT")
+    csub = cat.add_subparsers(dest="catcmd", required=True)
+
+    p = csub.add_parser("list", help="las entidades del catalogo, con su hash",
+                        parents=[common])
+    p.add_argument("--prefix", default=None,
+                   choices=("BP", "PM", "BI", "PC", "AP"),
+                   help="solo una categoria (por defecto, todas)")
+    p.set_defaults(func=cmd_catalog_list)
+
+    p = csub.add_parser("find", help="buscar entidades por subcadena del nombre",
+                        parents=[common])
+    p.add_argument("text", help="texto a buscar (sin distinguir mayusculas)")
+    p.set_defaults(func=cmd_catalog_find)
+
+    ob = sub.add_parser("objdb", help="bases kidsobjdb (_DOK0000/IDOK0000): contar, volcar y buscar")
+    obsub = ob.add_subparsers(dest="objcmd", required=True)
+
+    p = obsub.add_parser("stat", help="recuento por tamano y por type_hash de la base mayor",
+                         parents=[common])
+    p.add_argument("romfs", help="carpeta romfs (o un .fdata, o un kidsobjdb ya extraido)")
+    p.set_defaults(func=cmd_objdb_stat)
+
+    p = obsub.add_parser("dump", help="registros de un type_hash, con su id y sus trios",
+                         parents=[common])
+    p.add_argument("romfs", help="carpeta romfs (o un .fdata, o un kidsobjdb ya extraido)")
+    p.add_argument("--type", required=True, help="type_hash en hex, p. ej. 0x18eb1e56")
+    p.add_argument("--limit", type=int, default=10,
+                   help="cuantos registros volcar (por defecto 10; 0 = todos)")
+    p.set_defaults(func=cmd_objdb_dump)
+
+    p = obsub.add_parser("id", help="un registro por su id unico", parents=[common])
+    p.add_argument("romfs", help="carpeta romfs (o un .fdata, o un kidsobjdb ya extraido)")
+    p.add_argument("id", type=int, help="id del registro (campo +0x0C de su cabecera)")
+    p.set_defaults(func=cmd_objdb_id)
+
+    sn = sub.add_parser("snd", help="bancos de sonido .srsa (ASRS/KTSR): listar, extraer y sustituir")
+    snsub = sn.add_subparsers(dest="sndcmd", required=True)
+
+    p = snsub.add_parser("list", help="los streams del banco: codec, frecuencia, muestras, nombre",
+                         parents=[common])
+    p.add_argument("bank", help="fichero .srsa")
+    p.set_defaults(func=cmd_snd_list)
+
+    p = snsub.add_parser("extract", help="escribir el flujo crudo de cada stream",
+                         parents=[common])
+    p.add_argument("bank", help="fichero .srsa")
+    p.add_argument("--out", required=True, help="carpeta de salida (nunca dentro del romfs)")
+    p.add_argument("--stream", type=int, action="append",
+                   help="solo este stream (repetible); por defecto, todos")
+    p.set_defaults(func=cmd_snd_extract)
+
+    p = snsub.add_parser("replace", help="sustituir audio: intercambiar dos streams o meter otro flujo",
+                         parents=[common])
+    p.add_argument("bank", help="fichero .srsa de partida")
+    p.add_argument("--swap", type=int, nargs=2, metavar=("A", "B"),
+                   help="intercambiar de sitio los streams A y B (sin encoder)")
+    p.add_argument("--stream", type=int, help="stream cuyo audio se sustituye")
+    p.add_argument("--file", help="fichero con el flujo nuevo (mismo codec)")
+    p.add_argument("--from-banco", dest="from_banco",
+                   help="banco del que sale el audio (copia su cabecera de audio)")
+    p.add_argument("--from-stream", dest="from_stream", type=int,
+                   help="stream del banco de origen")
+    p.add_argument("-o", "--out", help="fichero de salida (por defecto: el mismo, con --in-place)")
+    p.add_argument("--in-place", action="store_true",
+                   help="escribir sobre el banco (deja <banco>.orig la primera vez)")
+    p.set_defaults(func=cmd_snd_replace)
+
+    p = snsub.add_parser("import",
+                         help="meter un WAV propio en un stream MS ADPCM (codificado aqui)",
+                         parents=[common])
+    p.add_argument("bank", help="fichero .srsa de partida")
+    p.add_argument("--stream", type=int, required=True, help="stream MS ADPCM que se sustituye")
+    p.add_argument("--wav", required=True,
+                   help="WAV PCM 16 bits mono; su frecuencia es la que se escribe en la cabecera")
+    p.add_argument("--loop", type=int, default=-1,
+                   help="muestra donde empieza el bucle (-1 = sin bucle, por defecto)")
+    p.add_argument("-o", "--out", help="fichero de salida (por defecto: el mismo, con --in-place)")
+    p.add_argument("--in-place", action="store_true",
+                   help="escribir sobre el banco (deja <banco>.orig la primera vez)")
+    p.set_defaults(func=cmd_snd_import)
+
+    p = snsub.add_parser("stat", help="codecs y tamanos de una carpeta de bancos",
+                         parents=[common])
+    p.add_argument("dir", help="carpeta con bancos .srsa (o uno suelto)")
+    p.set_defaults(func=cmd_snd_stat)
     return ap
 
 
@@ -715,6 +1678,30 @@ def main(argv: list[str] | None = None) -> int:
         out(sys.stderr, "ERROR: %s" % exc)
         return EXIT_USAGE
     except savemod.SaveError as exc:
+        out(sys.stderr, "ERROR: %s" % exc)
+        return getattr(exc, "exit_code", EXIT_INVALID)
+    except fdata.FdataError as exc:
+        out(sys.stderr, "ERROR: %s" % exc)
+        return getattr(exc, "exit_code", EXIT_INVALID)
+    except anim.AnimError as exc:
+        out(sys.stderr, "ERROR: %s" % exc)
+        return getattr(exc, "exit_code", EXIT_INVALID)
+    except catalog.CatalogError as exc:
+        out(sys.stderr, "ERROR: %s" % exc)
+        return getattr(exc, "exit_code", EXIT_INVALID)
+    except objdb.ObjDbError as exc:
+        out(sys.stderr, "ERROR: %s" % exc)
+        return getattr(exc, "exit_code", EXIT_INVALID)
+    except texcmd.TexError as exc:
+        out(sys.stderr, "ERROR: %s" % exc)
+        return getattr(exc, "exit_code", EXIT_INVALID)
+    except g1t.G1TError as exc:
+        out(sys.stderr, "ERROR: %s" % exc)
+        return getattr(exc, "exit_code", EXIT_INVALID)
+    except snd.SndError as exc:
+        out(sys.stderr, "ERROR: %s" % exc)
+        return getattr(exc, "exit_code", EXIT_INVALID)
+    except (texcmd.textures.TextureBackendMissing, texcmd.textures.TextureFormatError) as exc:
         out(sys.stderr, "ERROR: %s" % exc)
         return getattr(exc, "exit_code", EXIT_INVALID)
     except BrokenPipeError:  # pragma: no cover

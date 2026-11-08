@@ -33,7 +33,7 @@ from ..container import (
 )
 from . import types as mt
 from .errors import GuardError, ModError, Report
-from .manifest import ContainerView, Edit, Mod, TextEdit, validate
+from .manifest import ContainerView, Edit, Mod, TextEdit, text_expect_mismatch, validate
 
 BACKUP_DIR = ".pkp-backup"
 TMP_TAG = ".pkp-tmp"
@@ -103,29 +103,50 @@ def make_plan(mod: Mod, container: paths.Container,
         plan.writes.append(Write("bytes", edit.table, found, new, edit,
                                  abs_offset=start))
 
+    # --- texto: se VERIFICA contra el payload original y se CONSTRUYE sobre el buffer
+    #
+    # `expect_sha256` hashea el bloque entero (docs/MOD-FORMAT.md §3.1), y su
+    # referencia es el bloque **tal como esta en el contenedor antes del mod** —
+    # el que el autor tenia delante al escribir el hash. Compararlo contra el
+    # buffer en curso haria que la segunda edicion de un mismo bloque fallara por
+    # lo que hizo la primera (y que `validate`, que mira el payload pristino,
+    # diera otro veredicto para el mismo mod). Por eso se trocea el pool original
+    # una vez y se compara contra esa copia; solo la copia de trabajo se muta.
+    pristine: dict[int, tuple[list[bytes], bool]] = {}
+    work: dict[int, list[bytes]] = {}
+    seen: dict[tuple[int, int, int], TextEdit] = {}
     for text in mod.texts:
         spec = tables.get(text.table)
         if spec is None or spec.kind != "text":
             raise ModError("la tabla #%d no es de texto" % text.table, code="mod.table",
                            where=text.where())
-        buf = buffers[text.table]
-        slots, terminated = tables.parse_pool(spec, bytes(buf))
+        key = (text.table, text.id, text.slot)
+        if key in seen:
+            prev = seen[key]
+            raise ModError("dos ediciones del mismo slot de texto (%s y %s): declara "
+                           "una sola" % (prev.where(), text.where()),
+                           code="mod.text.duplicate", where=text.where())
+        seen[key] = text
+        if text.table not in pristine:
+            slots, terminated = tables.parse_pool(spec, plan.original[text.table])
+            pristine[text.table] = (slots, terminated)
+            work[text.table] = list(slots)
+        slots, terminated = pristine[text.table]
         ordinal = tables.slot_ordinal(spec, text.id, text.slot)
         if ordinal >= len(slots):
             raise ModError("el slot %d no existe (%d slots)"
                            % (ordinal, len(slots)), code="mod.text.range",
                            where=text.where())
-        old = slots[ordinal]
-        if old != text.expect.encode("utf-8"):
-            raise ModError(
-                "esperaba %r y encontre otro texto (%d B, sha256 %s)"
-                % (text.expect, len(old), hashlib.sha256(old).hexdigest()[:12]),
-                code="mod.text.expect", where=text.where())
-        slots[ordinal] = text.value.encode("utf-8")
-        new_pool = tables.build_pool(slots, terminated)
-        buffers[text.table] = bytearray(bytes(buf)[:spec.pool_start] + new_pool)
-        plan.writes.append(Write("text", text.table, old,
-                                 slots[ordinal], text, slot=ordinal))
+        old = work[text.table][ordinal]      # lo que se sustituye ahora
+        message = text_expect_mismatch(text, spec, slots)   # contra el original
+        if message:
+            raise ModError(message, code="mod.text.expect", where=text.where())
+        new = text.value.encode("utf-8")
+        work[text.table][ordinal] = new
+        new_pool = tables.build_pool(work[text.table], terminated)
+        buffers[text.table] = bytearray(bytes(buffers[text.table])[:spec.pool_start]
+                                        + new_pool)
+        plan.writes.append(Write("text", text.table, old, new, text, slot=ordinal))
 
     plan.updated = {t: bytes(b) for t, b in buffers.items()}
     for table in plan.original:

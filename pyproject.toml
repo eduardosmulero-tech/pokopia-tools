@@ -1,6 +1,6 @@
 [project]
 name = "pokopia-tools"
-version = "0.1.0"
+version = "0.2.0"
 description = "Kit de datos del contenedor: lectura, esquema, mods y save."
 # Fijado a lo que se midio: la suite se declara para 3.11 y NO se firma fuera de el.
 requires-python = ">=3.11,<3.12"

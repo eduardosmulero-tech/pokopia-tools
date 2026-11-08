@@ -171,7 +171,7 @@ untouched, but their position in the file moves.
 
 ## 4 · `mod.json` — root fields
 
-The full contract — why each rule exists, the merge table, the `apply` guarantees and the three
+The full contract — why each rule exists, the merge table, the `apply` guarantees and the four
 worked examples — is **[MOD-FORMAT.md](MOD-FORMAT.md)**. This section is the field reference it
 relies on.
 
@@ -219,14 +219,19 @@ change the payload size**.
 | `table` | integer | **yes** | Must be a text table (`#4636`–`#4653`). |
 | `id` | integer | **yes** | `4 … count+3`. |
 | `slot` | integer 0–5 | no (`0`) | Position in the 6-slot block. |
-| `expect` | string | **yes** | Current text of that slot (`""` if empty). |
+| `expect_sha256` | 64 lowercase hex | **one of the two** | sha256 of the block of `id`: the concatenation of the bytes of its slots, `+0`→`+5`, no terminator, no separator, no normalisation ([MOD-FORMAT.md](MOD-FORMAT.md) §3.1). This is the form that travels. |
+| `expect` | string | **one of the two** | Current text of that slot in clear (`""` if empty). Accepted by the kit; not published. |
 | `value` | string | **yes** | New text, UTF-8, no `\x00`. |
 | `why` | string | **yes** | As in `edits[]`. |
 | `confidence` | as `edits[]` | no | |
 
-Error messages **never** print the text found: a mismatch is reported as *expected* versus
-*found* by **length and truncated `sha256`**. That is a privacy rule of the project, not an
-oversight.
+Both `expect` and `expect_sha256` at once, or neither, is a schema error. Error messages **never**
+print the text: a mismatch is reported as *expected* versus *found* by **length and truncated
+`sha256`**. That is a privacy rule of the project, not an oversight.
+
+The hash is checked against the block **as it is in the container before the mod**, never against the
+state left by earlier edits of the same mod: two edits of one block in different slots carry the same
+digest and both apply; two edits of the same `(table, id, slot)` are an error (`mod.text.duplicate`).
 
 ### 4.3 Merge keys
 

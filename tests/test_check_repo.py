@@ -19,6 +19,7 @@ salta entero con el motivo escrito (no falla).
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -196,3 +197,54 @@ def test_lista_blanca_se_lee_del_constructor_de_la_release():
     assert entradas, "no se pudo leer la WHITELIST de tools/build_release.py"
     assert "pokopia" in entradas and "README.md" in entradas, entradas
     assert "informes" not in entradas and "tools" not in entradas, entradas
+
+
+# ---------------------------------------------------------------------------
+# Aviso de texto en claro en un mod (no es un fallo: es un aviso)
+# ---------------------------------------------------------------------------
+
+SHA_INVENTADO = "a" * 64
+
+
+def _mod_con_texto(tmp_path, edit: dict) -> None:
+    doc = {
+        "mod_format": 1, "name": "m", "version": "0.1.0", "authors": ["t"],
+        "game": {"title": "pokopia", "version": "2.0.1a",
+                 "container_md5": {"LD_C0_R.BIN": "0" * 32, "LI_C0_R.IDX": "1" * 32}},
+        "edits": [], "text": [dict({"table": 4650, "id": 5, "slot": 0,
+                                    "value": "MOD-INVENTADO-1", "why": "t"}, **edit)],
+    }
+    (tmp_path / "mod.json").write_text(json.dumps(doc), encoding="utf-8")
+
+
+def test_aviso_de_texto_en_claro_en_un_mod(tmp_path, capsys):
+    """Un `expect` con texto es el texto del juego pegado: se avisa, no se falla."""
+    _mod_con_texto(tmp_path, {"expect": "TEXTO-INVENTADO"})
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 0, salida
+    assert "AVISO" in salida, salida
+    assert "text[0].expect no esta vacio" in salida, salida
+    assert "expect_sha256" in salida, salida
+
+
+def test_sin_aviso_con_expect_sha256(tmp_path, capsys):
+    _mod_con_texto(tmp_path, {"expect_sha256": SHA_INVENTADO})
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 0, salida
+    assert "AVISO" not in salida, salida
+
+
+def test_sin_aviso_con_expect_vacio(tmp_path, capsys):
+    """`expect: ""` no lleva contenido: es la forma legitima de un bloque vacio."""
+    _mod_con_texto(tmp_path, {"expect": ""})
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 0, salida
+    assert "AVISO" not in salida, salida
+
+
+def test_el_arbol_publicable_no_tiene_avisos(capsys):
+    """Los ejemplos del repo usan `expect_sha256`: el arbol limpio no avisa."""
+    codigo = check_repo.main([])
+    salida = capsys.readouterr().out
+    assert codigo == 0, salida
+    assert "AVISO" not in salida, salida

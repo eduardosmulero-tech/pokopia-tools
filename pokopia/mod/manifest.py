@@ -4,11 +4,14 @@ El contrato es el de `docs/ARQUITECTURA-KIT.md` §4:
 
     mod_format, name, version, authors, game{title, version, container_md5},
     requires[], edits[{table,row,offset,type,expect,value,why}],
-    text[{table,id,value}], files[{path,sha256}]
+    text[{table,id,slot,expect_sha256|expect,value,why}], files[{path,sha256}]
 
-`expect` y `why` son obligatorios en toda edicion (de bytes o de texto). Aqui no
-se aplica nada: solo se lee, se comprueba la forma y —si se pasa el contenedor—
-los rangos, el `container_md5` y el `expect` contra los bytes reales.
+`expect` y `why` son obligatorios en toda edicion de bytes. En las ediciones de
+texto el `expect` es **o** `expect_sha256` **o** `expect` (texto en claro), nunca
+los dos: el sha256 del bloque es la forma publicable, porque identifica el bloque
+sin escribir su contenido (docs/MOD-FORMAT.md §3.1). Aqui no se aplica nada:
+solo se lee, se comprueba la forma y —si se pasa el contenedor— los rangos, el
+`container_md5` y el `expect` contra los bytes reales.
 """
 
 from __future__ import annotations
@@ -29,6 +32,8 @@ MOD_FORMAT = 1
 MANIFEST = "mod.json"
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 HEX32_RE = re.compile(r"^[0-9a-f]{32}$")
+#: sha256 del bloque de texto: 64 hex en minusculas, sin prefijo ni espacios.
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 CONFIDENCES = ("verified", "inference", "guess")
 REQUIRED_MD5_KEYS = (paths.BIN_NAME, paths.IDX_NAME)
 
@@ -73,25 +78,42 @@ class Edit:
 
 @dataclass
 class TextEdit:
-    """Una escritura de texto declarada: `table[id, slot] = value`."""
+    """Una escritura de texto declarada: `table[id, slot] = value`.
+
+    `expect_sha256` y `expect` son excluyentes y uno de los dos es obligatorio.
+    El hash es el del **bloque de 6 slots** del id, no el del slot suelto
+    (criterio fijado en docs/MOD-FORMAT.md §3.1): un solo hash cubre el bloque
+    entero y se calcula sin escribir ni una letra del juego.
+    """
 
     table: int
     id: int
     value: str
-    expect: str
     why: str
+    expect: str = ""
+    expect_sha256: str = ""
     slot: int = tables.SINGULAR_SLOT
     confidence: str = "verified"
     note: str = ""
     index: int = 0
+
+    @property
+    def uses_hash(self) -> bool:
+        """El `expect` de esta edicion es un sha256 de bloque (no texto)."""
+        return bool(self.expect_sha256)
 
     def where(self) -> str:
         return "text[%d] #%d id %d slot %d" % (self.index, self.table, self.id,
                                                self.slot)
 
     def as_dict(self) -> dict:
-        out = {"table": self.table, "id": self.id, "slot": self.slot,
-               "expect": self.expect, "value": self.value, "why": self.why}
+        out: dict[str, object] = {"table": self.table, "id": self.id, "slot": self.slot}
+        if self.uses_hash:
+            out["expect_sha256"] = self.expect_sha256
+        else:
+            out["expect"] = self.expect
+        out["value"] = self.value
+        out["why"] = self.why
         if self.confidence != "verified":
             out["confidence"] = self.confidence
         if self.note:
@@ -365,6 +387,7 @@ def _parse_texts(mod: Mod, doc: dict, rep: Report) -> None:
     if not isinstance(texts, list):
         rep.error("schema.text", "'text' debe ser una lista")
         return
+    seen: dict[tuple[int, int, int], int] = {}
     for i, raw in enumerate(texts):
         where = "text[%d]" % i
         if not isinstance(raw, dict):
@@ -377,11 +400,8 @@ def _parse_texts(mod: Mod, doc: dict, rep: Report) -> None:
             rep.error("schema.text.slot", "'slot' debe ser entero 0..5, es %r" % slot,
                       where)
             continue
-        expect = raw.get("expect")
+        expect, expect_sha256 = _parse_text_expect(raw, rep, where)
         if expect is None:
-            rep.error("schema.text.expect",
-                      "'expect' es obligatorio (texto actual; cadena vacia si el "
-                      "slot esta vacio)", where)
             continue
         value = raw.get("value")
         if not isinstance(value, str):
@@ -389,9 +409,6 @@ def _parse_texts(mod: Mod, doc: dict, rep: Report) -> None:
             continue
         if "\x00" in value:
             rep.error("schema.text.value", "'value' no puede contener NUL", where)
-            continue
-        if not isinstance(expect, str):
-            rep.error("schema.text.expect", "'expect' debe ser cadena", where)
             continue
         why, confidence, note = _parse_common(mod, raw, rep, where)
         spec = tables.get(table)
@@ -407,9 +424,60 @@ def _parse_texts(mod: Mod, doc: dict, rep: Report) -> None:
         except tables.TableError as exc:
             rep.error("schema.range", str(exc), where)
             continue
+        key = (table, text_id, slot)
+        if key in seen:
+            rep.error("mod.text.duplicate",
+                      "dos ediciones del mismo slot de texto (text[%d] y %s): declara "
+                      "una sola; para el mismo bloque usa slots distintos"
+                      % (seen[key], where), where)
+            continue
+        seen[key] = i
         mod.texts.append(TextEdit(table=table, id=text_id, value=value, expect=expect,
-                                  why=why, slot=slot, confidence=confidence,
+                                  expect_sha256=expect_sha256 or "", why=why,
+                                  slot=slot, confidence=confidence,
                                   note=note, index=i))
+
+
+def _parse_text_expect(raw: dict, rep: Report, where: str) -> tuple[str | None, str | None]:
+    """`expect` (texto en claro) o `expect_sha256` (bloque), excluyentes.
+
+    Devuelve `(expect, expect_sha256)`; `expect` es `None` si hay error y la
+    edicion no se puede construir.
+    """
+    has_text = "expect" in raw
+    has_hash = "expect_sha256" in raw
+    if has_text and has_hash:
+        rep.error("schema.text.expect",
+                  "'expect' y 'expect_sha256' son mutuamente excluyentes: declara solo "
+                  "uno (el sha256 del bloque, si no quieres escribir el texto en claro)",
+                  where)
+        return None, None
+    if not has_text and not has_hash:
+        rep.error("schema.text.expect",
+                  "falta 'expect_sha256' (sha256 del bloque de 6 slots; criterio en "
+                  "docs/MOD-FORMAT.md §3.1). 'expect' con el texto en claro se acepta, "
+                  "pero no se publica", where)
+        return None, None
+    if has_hash:
+        sha = raw["expect_sha256"]
+        if not isinstance(sha, str):
+            rep.error("schema.text.expect_sha256",
+                      "'expect_sha256' debe ser cadena, es %s" % type(sha).__name__,
+                      where)
+            return None, None
+        if not SHA256_RE.match(sha):
+            rep.error("schema.text.expect_sha256",
+                      "'expect_sha256' debe ser sha256 hexadecimal en minusculas de 64 "
+                      "caracteres (es %d caracteres: %r)"
+                      % (len(sha), sha[:16] + ("..." if len(sha) > 16 else "")),
+                      where)
+            return None, None
+        return "", sha
+    expect = raw["expect"]
+    if not isinstance(expect, str):
+        rep.error("schema.text.expect", "'expect' debe ser cadena", where)
+        return None, None
+    return expect, None
 
 
 def _parse_files(mod: Mod, doc: dict, rep: Report) -> None:
@@ -532,6 +600,33 @@ def _check_edit(edit: Edit, blob: bytes, spec: tables.TableSpec | None,
                      mt.describe(edit.type, found)), edit.where())
 
 
+def text_expect_mismatch(text: TextEdit, spec: tables.TableSpec,
+                         slots: list[bytes]) -> str | None:
+    """Mensaje de fallo del `expect` de un texto, o `None` si cuadra.
+
+    Regla dura (docs/MOD-FORMAT.md §3, privacidad del texto): el mensaje **nunca**
+    imprime el texto del juego. Ni el encontrado ni el esperado: solo longitudes
+    y sha256. El esperado tambien se calla cuando el mod traia texto en claro,
+    porque ese texto vino del juego cuando el autor lo copio del dump.
+    """
+    if text.uses_hash:
+        block = tables.block_slots(spec, slots, text.id)
+        found = tables.block_sha256(spec, slots, text.id)
+        if found == text.expect_sha256:
+            return None
+        return ("esperaba el bloque con sha256 %s y encontre otro (%d B en %d slots, "
+                "sha256 %s)" % (text.expect_sha256, len(b"".join(block)),
+                                len(block), found[:12]))
+    expected = text.expect.encode("utf-8")
+    ordinal = tables.slot_ordinal(spec, text.id, text.slot)
+    found_slot = slots[ordinal]
+    if found_slot == expected:
+        return None
+    return ("esperaba un texto de %d B y encontre otro de %d B (sha256 %s)"
+            % (len(expected), len(found_slot),
+               hashlib.sha256(found_slot).hexdigest()[:12]))
+
+
 def _check_text(text: TextEdit, blob: bytes, spec: tables.TableSpec, rep: Report) -> None:
     try:
         slots, _ = tables.parse_pool(spec, blob)
@@ -543,16 +638,10 @@ def _check_text(text: TextEdit, blob: bytes, spec: tables.TableSpec, rep: Report
         rep.error("mod.text.range", "el slot %d no existe (la tabla tiene %d slots)"
                   % (ordinal, len(slots)), text.where())
         return
-    found = slots[ordinal]
-    if found != text.expect.encode("utf-8"):
-        # El texto encontrado NO se imprime nunca: se identifica por hash y tamano
-        # (regla de cero contenido del juego, docs/ARQUITECTURA-KIT.md §0).
-        rep.error("mod.text.expect",
-                  "esperaba %r (%d B) y encontre otro texto (%d B, sha256 %s)"
-                  % (text.expect, len(text.expect.encode("utf-8")),
-                     len(found), hashlib.sha256(found).hexdigest()[:12]),
-                  text.where())
-
-
-def _short(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    try:
+        message = text_expect_mismatch(text, spec, slots)
+    except tables.TableError as exc:
+        rep.error("mod.text.geometry", str(exc), text.where())
+        return
+    if message:
+        rep.error("mod.text.expect", message, text.where())
