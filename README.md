@@ -8,6 +8,10 @@ This repository contains **no game content**: no assets, no textures, no models,
 names, no dump, no keys. See [PROCEDENCIA.md](PROCEDENCIA.md) for the provenance of every
 figure and the full list of what is deliberately absent.
 
+**New in 0.4.0** — nothing changed in the library: this release ships the 0.3.0 code as a
+**downloadable artifact** (`pokopia-tools-0.4.0.tar`) with a `SHA256SUMS` file, which
+0.1.0-0.3.0 never had. Every figure below is the 0.3.0 measurement, unchanged.
+
 **New in 0.3.0** — the four asset families around the container now travel in the release:
 `G1T` textures (**14,412 files / 14,713 textures**, 99.85 % writable), a `G1M` model reader in the
 package, `G2A` animations (**17,428 files**, byte-exact round trip) and the `ASRS`/`KTSR` sound
@@ -27,7 +31,7 @@ reproducible with a command; what does not work is listed under
 | A public **repacker** for that container, verified byte for byte: 12,298 / 12,298 payloads and 0 bytes different on rebuild, with the zlib build declared in `pyproject.toml`. | A decryption or key tool. It never handles a key and never reads an encrypted file. |
 | A **declarative mod format** (`mod.json`): every edit declares which bytes it expects to find and refuses to apply if they are not there. | An emulator, an online-play tool or anything for multiplayer. There is no networking code in this repository. |
 | A save reader/writer for **save version 2.0.1 only**, with a mandatory backup and a printed undo command. | A general save editor. For save editing there is already a mature tool (see [credits and provenance](#licence-provenance-and-credits)); this kit's own contribution is the container writer. |
-| A library plus a CLI, with the schema kept in data files. | A GUI, and not a stable 1.0 API. Version 0.3.0, mod format version 1. Interfaces still move. |
+| A library plus a CLI, with the schema kept in data files. | A GUI, and not a stable 1.0 API. Version 0.4.0, mod format version 1. Interfaces still move. |
 | A reader for the **`.fdata` archives** that sit next to the container: 79,710 typed entries across 24 files, and the `.rdb` master index. | A general-purpose unpacker of the whole RomFS: the types it does not document are listed and extracted, nothing more. |
 | A reader **and writer** for `G1T` textures (14,713 measured, 99.85 % writable) and `G2A` animations (17,428 files, byte-for-byte round trip). | A mod-ready texture pipeline for the 0.15 % that is BC6H, which stays read-only. |
 | A **`G1M` reader** in the package: header, chunks, sections, mesh geometry and field-by-field diff. | A model writer. Repacking a `G1M` needs an external tool and is not byte-identical; the figures are in [SPEC-G1M.md](docs/SPEC-G1M.md) §7. |

@@ -10,7 +10,7 @@ You need: **your own legally obtained game files** (the folder that contains `LD
 commands (`pkp tex extract`, `pkp tex inject --png`) additionally want `numpy`, `imagecodecs` and
 `etcpak`; every other command runs on the standard library.
 
-> CLI output is in Spanish in version 0.3.0. The interface that matters is the numbers and the
+> CLI output is in Spanish in version 0.4.0. The interface that matters is the numbers and the
 > exit code (`0` ok, `1` invalid, `2` usage error); every term is translated in
 > [GLOSSARY.md](GLOSSARY.md).
 
@@ -170,7 +170,7 @@ is applied. Refusing beats guessing.
 
 ---
 
-## 8 · Look inside the archives (read-only, version 0.3.0)
+## 8 · Look inside the archives (read-only, version 0.4.0)
 
 Next to the container there are 24 `.fdata` archives with the scenes, textures, animations and
 sound banks. Nothing here writes; it only walks headers and decompresses in memory.
@@ -266,7 +266,7 @@ Formats and limits: [SPEC-FDATA.md](SPEC-FDATA.md), [SPEC-G1T.md](SPEC-G1T.md),
 * **Saves.** `pkp save read/write` exists, works on save version 2.0.1 only, and is
   documented in [GLOSSARY.md](GLOSSARY.md#6--save-parameters). Read it before writing: a save is
   not a copy you can regenerate.
-* **Adding new content** to the container. Version 0.3.0 rewrites bytes and text in existing
+* **Adding new content** to the container. Version 0.4.0 rewrites bytes and text in existing
   tables; it does not create entries, and it does not create models.
 * **Writing `.fdata`.** Textures, animations and sound banks can be modified, but the result is a
   standalone file: putting it back into its archive is not implemented, so nothing from that path
