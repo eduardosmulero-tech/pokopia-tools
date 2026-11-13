@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 @dataclass(frozen=True)
@@ -106,18 +106,7 @@ for i, lang in enumerate(NAMES_LANGS):
                    confidence="verified", source="docs/SPEC-NAMES.md §3.1",
                    note="nombres; pool en 96.102 (6 ceros de separacion, medido)"))
 
-# --- tablas de texto con punteros + pool (docs/SPEC-DIALOGOS.md) ------------
-#: Familia de diálogo: 9 entradas = 9 idiomas, mismo `count` y misma fila = misma
-#: escena. Geometria: 64 B de cabecera, `count` registros de 8 B y pool en
-#: 64 + 8*count; `inicio(fila) = a - 8*(count - fila)`. Ver `textpool.py`.
-DIALOGOS_LANGS = ("jp", "en", "fr", "it", "de", "es", "zh-TW", "kr", "zh-CN")
-for i, lang in enumerate(DIALOGOS_LANGS):
-    _add(TableSpec(index=3250 + i, kind="pool", header=64, stride=8, count=391,
-                   version=2, pool_start=64 + 391 * 8, language=lang,
-                   confidence="verified", source="docs/SPEC-DIALOGOS.md §2 y §6",
-                   note="dialogos de escena; pool desde 3192 (medido, 391/391 filas)"))
-
-#: tabla de texto con punteros (`kind="pool"`): sin bloques de 6 slots
+#: primera/ultima id de texto valida (`r` en 4..count+3, docs/SPEC-NAMES.md §6)
 TEXT_FIRST_ID = 4
 SLOTS_PER_BLOCK = 6
 SINGULAR_SLOT = 0
@@ -138,8 +127,6 @@ def table_name(index: int) -> str:
         return "#%d (sin geometria declarada)" % index
     if spec.kind == "text":
         return "#%d textos %s" % (index, spec.language)
-    if spec.kind == "pool":
-        return "#%d texto con punteros %s (%d filas)" % (index, spec.language, spec.count)
     return "#%d registros de %d B" % (index, spec.stride)
 
 
@@ -149,23 +136,53 @@ class TableError(ValueError):
     """El payload no cuadra con la geometria declarada."""
 
 
-def check_header(spec: TableSpec, blob: bytes) -> tuple[int, int]:
-    """Comprueba count/version del header y devuelve (count, version)."""
+def check_header(spec: TableSpec, blob: bytes, *, modificado: bool = False) -> tuple[int, int]:
+    """Comprueba count/version del header y devuelve (count, version).
+
+    Por defecto el `count` tiene que ser exactamente el declarado: un dump de
+    otra version o un payload corrupto falla aqui, y debe fallar. Con
+    `modificado=True` (el flag `--modificado` de la CLI) se admite que un
+    contenedor **derivado** del dump traiga mas filas que el declarado
+    (docs/AÑADIR-FILAS.md); entonces la estructura se comprueba contra el
+    `count` real, no contra el declarado, y el llamante recibe ese count real
+    para derivar la geometria con `con_conteo`. El `version` no admite deriva
+    en ninguno de los dos modos: es el marcador de formato.
+    """
     if len(blob) < spec.header:
         raise TableError("#%d: payload de %d B, header de %d B"
                          % (spec.index, len(blob), spec.header))
     count = struct.unpack_from("<I", blob, spec.count_field)[0]
     version = struct.unpack_from("<I", blob, spec.version_field)[0]
-    if count != spec.count:
+    if count != spec.count and not modificado:
         raise TableError("#%d: count del header %d != %d declarado"
                          % (spec.index, count, spec.count))
     if spec.version is not None and version != spec.version:
         raise TableError("#%d: version del header %d != %d declarado"
                          % (spec.index, version, spec.version))
-    if len(blob) < spec.records_end:
+    records_end = spec.header + count * spec.stride
+    if len(blob) < records_end:
         raise TableError("#%d: payload de %d B y el area de registros acaba en %d"
-                         % (spec.index, len(blob), spec.records_end))
+                         % (spec.index, len(blob), records_end))
     return count, version
+
+
+def con_conteo(spec: TableSpec, count: int) -> TableSpec:
+    """Geometria derivada del `count` real de un contenedor derivado.
+
+    La spec formula la geometria en terminos del `count` del header, no como
+    constantes: el area de registros es `header + stride*count` y, en las
+    tablas de texto, el pool arranca justo despues (SPEC-NAMES §11.2). Aqui se
+    aplica ese mismo desplazamiento al `pool_start` declarado, lo que conserva
+    su anomalia conocida (`#4638` arranca 1 B despues de lo esperado).
+    Sin cambio de `count` devuelve el propio spec: para el dump canonico no hay
+    geometria nueva.
+    """
+    if count == spec.count:
+        return spec
+    pool = spec.pool_start
+    if pool is not None:
+        pool = pool + spec.stride * (count - spec.count)
+    return replace(spec, count=count, pool_start=pool)
 
 
 def read_row(spec: TableSpec, blob: bytes, row: int) -> bytes:

@@ -25,6 +25,12 @@ assistance as declared in §6.
   does not obtain, download, decrypt or describe how to obtain one — that is out of scope
   permanently, not by omission.
 
+* **Scope decision (2026-11-09):** the save reader/writer goes into **maintenance** — it keeps
+  working for the save version it supports and receives no new features — and the effort moves
+  to the container and the mod format ([README §Roadmap](README.md#roadmap)). This is a declared
+  decision, not abandonment: for save editing the living reference is
+  [PokoHex](https://github.com/berichan/PokoHex).
+
 ---
 
 ## 2 · Provenance of the facts

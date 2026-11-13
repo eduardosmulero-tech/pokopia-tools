@@ -139,6 +139,17 @@ def merge_mods(path_a: str, path_b: str, out_dir: str | None = None, *,
     if not rep.ok:
         return MergeResult(None, rep)
 
+    # Los ficheros de overlay no se componen: `merge` produce un unico `mod.json` y
+    # cada mod trae sus propios ficheros. Instalarlos por separado deja el mismo
+    # resultado y `pkp mod status` avisa si dos de ellos pisan la misma ruta.
+    con_romfs = [mod.label for mod in (a, b) if mod.romfs]
+    if con_romfs:
+        rep.error("merge.romfs",
+                  "%s declara ficheros en `romfs[]`: los ficheros de overlay no se "
+                  "combinan, instala los dos mods en el almacen y deja que el orden de "
+                  "`DM_ROMFS_OVERLAY` decida" % " y ".join(con_romfs))
+        return MergeResult(None, rep)
+
     if a.container_md5 and b.container_md5 and a.container_md5 != b.container_md5:
         rep.error("merge.container_md5",
                   "los dos mods declaran contenedores distintos: %s y %s"

@@ -8,19 +8,6 @@ This repository contains **no game content**: no assets, no textures, no models,
 names, no dump, no keys. See [PROCEDENCIA.md](PROCEDENCIA.md) for the provenance of every
 figure and the full list of what is deliberately absent.
 
-**New in 0.4.0** — nothing changed in the library: this release ships the 0.3.0 code as a
-**downloadable artifact** (`pokopia-tools-0.4.0.tar`) with a `SHA256SUMS` file, which
-0.1.0-0.3.0 never had. Every figure below is the 0.3.0 measurement, unchanged.
-
-**New in 0.3.0** — the four asset families around the container now travel in the release:
-`G1T` textures (**14,412 files / 14,713 textures**, 99.85 % writable), a `G1M` model reader in the
-package, `G2A` animations (**17,428 files**, byte-exact round trip) and the `ASRS`/`KTSR` sound
-banks with **your own audio on every stream that carries its data inside the bank** — 18,835 of
-18,835 streams, 398 of 403 banks — using the kit's own MS ADPCM **and `KA1A`** encoders. Also the
-24 `.fdata` archives that hold all of it, and the pointer-plus-pool text tables. Every figure is
-reproducible with a command; what does not work is listed under
-[status](#status-what-is-measured-what-is-not) rather than glossed over.
-
 ---
 
 ## What this is / what this is not
@@ -30,12 +17,8 @@ reproducible with a command; what does not work is listed under
 | A reader and a **writer** for the pair `LD_C0_R.BIN` + `LI_C0_R.IDX`, the data container of the build named above. | A distribution of the game, its data, its assets or its text. Nothing here replaces a copy you must already own. |
 | A public **repacker** for that container, verified byte for byte: 12,298 / 12,298 payloads and 0 bytes different on rebuild, with the zlib build declared in `pyproject.toml`. | A decryption or key tool. It never handles a key and never reads an encrypted file. |
 | A **declarative mod format** (`mod.json`): every edit declares which bytes it expects to find and refuses to apply if they are not there. | An emulator, an online-play tool or anything for multiplayer. There is no networking code in this repository. |
-| A save reader/writer for **save version 2.0.1 only**, with a mandatory backup and a printed undo command. | A general save editor. For save editing there is already a mature tool (see [credits and provenance](#licence-provenance-and-credits)); this kit's own contribution is the container writer. |
-| A library plus a CLI, with the schema kept in data files. | A GUI, and not a stable 1.0 API. Version 0.4.0, mod format version 1. Interfaces still move. |
-| A reader for the **`.fdata` archives** that sit next to the container: 79,710 typed entries across 24 files, and the `.rdb` master index. | A general-purpose unpacker of the whole RomFS: the types it does not document are listed and extracted, nothing more. |
-| A reader **and writer** for `G1T` textures (14,713 measured, 99.85 % writable) and `G2A` animations (17,428 files, byte-for-byte round trip). | A mod-ready texture pipeline for the 0.15 % that is BC6H, which stays read-only. |
-| A **`G1M` reader** in the package: header, chunks, sections, mesh geometry and field-by-field diff. | A model writer. Repacking a `G1M` needs an external tool and is not byte-identical; the figures are in [SPEC-G1M.md](docs/SPEC-G1M.md) §7. |
-| A reader and writer for `ASRS`/`KTSR` sound banks, **including your own audio** on all 18,835 internal streams (398 of 403 banks) with two encoders of its own: MS ADPCM and `KA1A`. | An audio player or converter, and nothing that is known to sound in the game yet: `.fdata` writing is not implemented. |
+| A save reader/writer for **save version 2.0.1 only**, kept in **maintenance**: it still works for the save version it supports, with its mandatory backup and printed undo command, and it gets no new features. | A general save editor, and not a save editing tool under development. For save editing the living reference is [PokoHex](https://github.com/berichan/PokoHex) (C#, GPL-3.0); this kit's own contribution is the container writer. |
+| A library plus a CLI, with the schema kept in data files. | A GUI, and not a stable 1.0 API. Version 0.5.0, mod format version 1. Interfaces still move. |
 
 ---
 
@@ -101,12 +84,7 @@ never seen this repository, including the undo and what to do when a step fails.
   the recompressed slots come out different; the tool still works, the identity guarantee
   does not apply.
 * **Nothing else at runtime**: the CLI and the library are standard library only. The test
-  suite needs `pytest`. The measurement scripts that produced the figures in these documents are
-  not part of this release; the tests in `tests/` are.
-* **Optional, only for pixel work**: `numpy`, `imagecodecs` (decode BC1/BC3/BC4/BC5/BC6H/BC7 and
-  PNG) and `etcpak` (encode BC1/BC3/BC4/BC5/BC7). Without them `pkp tex list` and
-  `pkp tex inject --same` still work; `extract` and `inject --png` exit with code 2 and name what
-  is missing.
+  suite needs `pytest`, and the measurement scripts under `tools/` additionally need `PyYAML`.
 
 ---
 
@@ -129,19 +107,30 @@ directory, and each one can be overridden.
 Every command that writes has `--dry-run` as its **default**, and there is no code path that
 writes to your dump.
 
+Global options go before the command (`pkp --container <dir> …`): `--container`, `--json`, and
+`--modificado`, which lets the read commands open a **derived** container whose `count` grew past
+the declared one (rows added on purpose). Without that flag a drifted `count` is still an error,
+as it must be; `version` never drifts. See `docs/AÑADIR-FILAS.md` in the repository (not shipped
+in the package).
+
 | Command | What it does |
 |---|---|
 | `pkp info` | Entry count, flags, sizes, md5 of both files, and which tables have known geometry. |
-| `pkp table <n> [--rows a:b]` | Dump a table using its declared geometry (header, count, stride, confidence). |
-| `pkp row <n> <r>` | One row, field by field, with the confidence of each field. |
+| `pkp table <n> [--rows a:b] [--modificado]` | Dump a table using its declared geometry (header, count, stride, confidence). |
+| `pkp row <n> <r> [--modificado] [--texto]` | One row, field by field, with the confidence of each field. On text tables `--texto` also prints the slots in clear next to their `sha256` — terminal only, never redirect that to a file in the repo (content rule). |
 | `pkp dump <entry> <out>` | Write the decompressed payload of one entry to a file. |
 | `pkp repack <outdir> [--recompress]` | Rebuild the container and compare md5 with the source. Exit 0 only if identical. |
 | `pkp mod new <name>` | Skeleton `mod.json`, with the md5 of your container filled in. |
 | `pkp mod validate <dir>` | Schema, ranges, cross-references, `container_md5` and every `expect`. |
 | `pkp mod merge <a> <b> -o <dir>` | Compose two mods and report overlaps. |
 | `pkp mod apply <dir> [--yes]` | Apply to a **copy**; dry run by default; backup and undo command printed. |
-| `pkp save read [--page G00\|B00]` | Inventory region of a save: geometry, occupied slots, distinct ids. |
-| `pkp save write --slot N [--id .. --count .. --variant ..]` | Write one slot; dry run by default; backup, manifest and undo. |
+| `pkp mod pack <dir> [--img <RomFS.img>]` | Package a working folder into a deterministic `.pkmod` (ZIP) with the original hashes recorded. |
+| `pkp mod example <dir>` | Write a valid example mod with 23 bytes generated by the kit (no game content), to follow [MAKE-A-MOD.md](docs/MAKE-A-MOD.md). |
+| `pkp mod install <dir\|.pkmod> --overlay <store>` | Put it in the overlay folder the game reads first; the `img` is not touched. Refuses while the game runs. |
+| `pkp mod uninstall <name> --overlay <store> --img <RomFS.img>` | Remove only that mod's files and **prove** the original comes back (`sha256`). |
+| `pkp mod status` / `pkp mod doctor` | What is installed, what each mod overrides, who wins each conflict, and a consistency check. |
+| `pkp save read [--page G00\|B00] [--nombres [--idioma es]]` | Inventory region of a save: geometry, occupied slots, distinct ids. `--nombres` adds each item's name, resolved at run time from the item table and the name table (needs the container; `<sin nombre>` when a slot has no text). Without the flag the output does not change. |
+| `pkp save write --slot N [--id .. --count .. --variant ..] [--nombres]` | Write one slot; dry run by default; backup, manifest and undo. With `--nombres` the dry run prints which slot and which object (by name) it is about to change. |
 | `pkp save undo <backup> [--yes]` | Restore from one of those backups. |
 | `pkp progress` | Counts only (occupied slots, distinct ids, catalogue bits) with the confidence of each figure. |
 | `pkp fdata list <path>` | Header of every entry in a `.fdata` (PDRK/IDRK): offset, type, sizes, name hash, flags. |
@@ -167,7 +156,7 @@ writes to your dump.
 | `pkp snd replace <bank.srsa> --swap A B` | Swap two sounds in place (no audio byte changes); `-o` or `--in-place` with `<bank>.orig`. |
 | `pkp snd replace <bank.srsa> --stream N --file F [--from-banco B --from-stream M]` | Put another sound's stream into slot N, recalculating the three sizes; with `--from-banco`, also copy its audio header. |
 | `pkp snd stat <dir>` | Bank count, codecs, and how many streams are replaceable by each route. |
-| `pkp snd import <bank.srsa> --stream N --wav F [--loop MS]` | Put **your own** audio (PCM 16-bit mono WAV) into a stream: encodes it with the kit's own MS ADPCM encoder, or the `KA1A` one when the destination stream is `KA1A`, keeps the destination's block size or bitrate mode, rewrites rate/samples/loop and prints the round-trip SNR. `-o` or `--in-place` with `<bank>.orig`. |
+| `pkp snd import <bank.srsa> --stream N --wav F [--loop MS]` | Put **your own** audio (PCM 16-bit mono WAV) into an MS ADPCM stream: encodes it with the kit's own encoder, rewrites rate/samples/loop, refuses KA1A (no encoder exists). `-o` or `--in-place` with `<bank>.orig`. |
 
 Add `--json` to any command for machine-readable output.
 
@@ -250,17 +239,6 @@ guarantees and what it refuses to do — is **[docs/MOD-FORMAT.md](docs/MOD-FORM
   order of slots.
 * Save version 2.0.1: header, magic, inventory region (130 records of 5 bytes), the id mask
   (13 bits) and the count byte, on both save pages.
-* The 24 `.fdata` archives: 79,710 entries, 25 types, the two chunk framings and the `.rdb`
-  master index.
-* `G1T` textures: 14,412 files, 14,713 textures, 13,985 with an exact 512 B per-level mip chain
-  (95.05 %), 99.85 % writable, swizzle in 8×8 blocks.
-* `G1M` models: header, chunks, sections, vertex/index/submesh layout, mesh counting and
-  field-by-field diff — [SPEC-G1M.md](docs/SPEC-G1M.md).
-* `G2A` animations: 17,428 files read and rewritten byte for byte (17,428 / 17,428).
-* Sound banks: 403 banks, 19,297 streams, 18,835 with the audio inside; **both codecs have an
-  encoder**, so your own audio covers 18,835 / 18,835 internal streams in 398 of 403 banks.
-* The pointer-plus-pool text tables: 2,409 of the 12,298 entries, 272,281 strings,
-  32,864,377 B, three substitution modes.
 
 **Not known, and not claimed**
 
@@ -268,20 +246,12 @@ guarantees and what it refuses to do — is **[docs/MOD-FORMAT.md](docs/MOD-FORM
 * No confirmed reference from `#983` to the model table `#44`: geometry for a new object
   cannot be created, only existing rows can be re-pointed to existing variants.
 * The semantics of the catalogue bitmap in the save (which bit means what).
-* `G1M` material, shader, palette and socket sections: parsed as opaque and preserved, not
-  interpreted.
-* 641 `G1T` textures (4.36 %) whose mip chain is not explained yet, and 22 BC6H textures that
-  cannot be re-encoded.
-* Whether the engine accepts any of it: `vgmstream` validates the audio file, not the game, and
-  nothing here writes a `.fdata`.
+* Whether the game accepts the result of a mod: nothing here executes the game.
 
 **Not implemented**
 
 * Creating **new entries** in the container, or changing an entry's `blockSize` or `flag`.
 * Installing `files[]` payloads (only their shape is checked) and resolving `requires`.
-* Writing a `.fdata`, and therefore putting a modified texture, model, animation or sound bank
-  back into the game.
-* A `pkp` subcommand for models: the `G1M` reader is a library API only.
 * Any GUI. Any 32-bit/other-platform build. Any other game version.
 
 ---
@@ -290,24 +260,35 @@ guarantees and what it refuses to do — is **[docs/MOD-FORMAT.md](docs/MOD-FORM
 
 | Document | What it covers |
 |---|---|
+| [docs/MAKE-A-MOD.md](docs/MAKE-A-MOD.md) | **Start here to make one:** from your own file to a `.pkmod`, with a generated example mod and the mistakes `validate` names. |
+| [docs/INSTALL-AND-DIAGNOSE.md](docs/INSTALL-AND-DIAGNOSE.md) | **Start here to use one:** install, launch with the overlay variable, uninstall, and `doctor`'s causes with their literal messages. |
 | [docs/QUICKSTART.md](docs/QUICKSTART.md) | The 30-second path, verified step by step, with undo. |
 | [docs/GLOSSARY.md](docs/GLOSSARY.md) | Every parameter: container, table geometry, text pool, `mod.json` keys, CLI flags, save fields. |
 | [docs/MOD-FORMAT.md](docs/MOD-FORMAT.md) | The mod contract: manifest, `edits[]`, `text[]` (including the `expect_sha256` criterion), merge, `apply` guarantees, `validate` matrix, exit codes and the four worked examples. |
 | [docs/SPEC-CONTAINER.md](docs/SPEC-CONTAINER.md) | Byte-level specification of the container, with test vectors. |
 | [docs/SPEC-NAMES.md](docs/SPEC-NAMES.md) | The nine name tables and nine description tables. |
-| [docs/SPEC-FDATA.md](docs/SPEC-FDATA.md) | The 24 `.fdata` archives: 79,710 entries, 25 types, both chunk framings and the `.rdb` master index. |
-| [docs/SPEC-G1T.md](docs/SPEC-G1T.md) | Textures `G1T`: header field by field, the 512 B per-level mip chain, the pixel-format census, the tile swizzle and what stays read-only. |
-| [docs/SPEC-G1M.md](docs/SPEC-G1M.md) | Models `G1M`: the 12-byte wrapper trap, header, chunks, sections, mesh counting and what the round trip preserves and re-lays out. |
-| [docs/SPEC-G1A.md](docs/SPEC-G1A.md) | Animations `G2A`: 32 B header, 10-bit bones, key blocks and the byte-exact rewrite. |
-| [docs/SPEC-TEXT.md](docs/SPEC-TEXT.md) | The pointer-plus-pool text scheme: 2,409 tables, the `a` field that is not an offset, and the three substitution modes. |
-| [docs/AUDIO.md](docs/AUDIO.md) | Sound banks (`ASRS`/`KTSR`): index, sound header field by field, the four write routes and their measured coverage. |
-| [docs/AUDIO-KA1A.md](docs/AUDIO-KA1A.md) | The `KA1A` transform codec byte by byte: frames, 21 bands, logarithmic codes, the window, and the kit's encoder with its measured quality. |
+| [patches/README.md](patches/README.md) | The rules for code patches: text-only definitions, `sha256` of the original, build id, expected and new bytes, and the one-command revert. No game content. |
 | [PROCEDENCIA.md](PROCEDENCIA.md) | Who made this, from which measurements, under which licence, and what is excluded. |
 | [github.com/eduardosmulero-tech/pokopia-data-formats](https://github.com/eduardosmulero-tech/pokopia-data-formats) | The published format specifications (CC BY-SA 4.0). |
 
 `docs/` also holds working notes in Spanish (item-row schema, save regions, architecture,
-reports). They are kept in the repository for continuity and are not part of the documented
-interface.
+reports, and the texture, model, animation and audio measurements: `G1T-FORMAT.md`,
+`MODELOS-G1M-Y-TEXTURAS-G1T.md`, `ANIMACIONES-G2A.md`, `AUDIO-KTSR.md`, `AUDIO-PROPIO.md`). They are
+kept in the repository for continuity and are not part of the documented interface; only the
+documents in the table above travel in the release.
+
+---
+
+## Roadmap
+
+1. **The container and the mod format**: the writer, the manifest, install/uninstall, diagnose.
+2. **A task-shaped document** — *make a mod in ten steps* — tested by following it literally.
+3. **Semantic verification**: proving that an edit touches the field it claims, not only that it applies.
+
+**Not on the roadmap:** a general save editor (the save reader/writer stays in maintenance and the
+community tool covers it), a GUI (a CLI plus data files is the whole interface this kit commits
+to), and generic merge beyond per-row, per-offset composition (guessing at a conflict is worse
+than refusing it).
 
 ---
 

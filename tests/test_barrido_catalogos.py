@@ -27,7 +27,7 @@ RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HERRAMIENTA = os.path.join(RAIZ, "tools", "barrido_catalogos.py")
 if not os.path.isfile(HERRAMIENTA):
     pytest.skip(
-        "tools/ no viaja en la release: el barrido de catalogo vive en tools/",
+        "tools/ no viaja en la release: el barrido no esta en este arbol",
         allow_module_level=True,
     )
 if os.path.join(RAIZ, "tools") not in sys.path:

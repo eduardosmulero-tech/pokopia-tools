@@ -185,10 +185,10 @@ relies on.
 | `game.title` | string | **yes** | Internal title id of the game. | error |
 | `game.version` | string | **yes** | Game version the mod was written for (`2.0.1a`). | error |
 | `game.container_md5` | object | **yes** | md5 of **both** files. Without it nothing is applied. | error if it differs from the real files |
-| `requires` | list | no | Dependencies as strings or objects. Preserved; **not resolved** in 0.1.0. | shape only |
+| `requires` | list | no | Dependencies as strings or objects. Preserved; **not resolved** in 0.5.0. | shape only |
 | `edits` | list | no* | Byte writes (§4.1). | see §4.1 |
 | `text` | list | no* | Text writes (§4.2). | see §4.2 |
-| `files` | list | no | `{"path", "sha256"}`. **Not installed** in 0.1.0; shape checked only. | shape only |
+| `files` | list | no | `{"path", "sha256"}`. **Not installed** in 0.5.0; shape checked only. | shape only |
 
 \* A mod with neither `edits` nor `text` is valid and does nothing (`mod.empty` warning).
 Unknown root keys produce a **warning**, not an error, so old readers tolerate new fields.

@@ -8,12 +8,19 @@ Comandos implementados aqui:
     pkp dump <entrada> <salida>
     pkp repack <dir> [--recompress]
     pkp mod new <nombre>
-    pkp mod validate <carpeta>
+    pkp mod validate <carpeta> [--img <RomFS.img>]
     pkp mod merge <a> <b> [-o <dir>]
     pkp mod apply <carpeta> [--dry-run | --yes]
+    pkp mod pack <carpeta> [-o <dir>] [--img <RomFS.img>]
+    pkp mod install <carpeta|paquete> --overlay <almacen> [--img <RomFS.img>]
+    pkp mod uninstall <mod> --overlay <almacen> --img <RomFS.img>
+    pkp mod status --overlay <almacen> [--img <RomFS.img>]
+    pkp mod doctor --overlay <almacen> [--img <RomFS.img>]
     pkp fdata list|stat|extract <ruta> [--type kidsobjdb]
     pkp catalog list [--prefix BP|PM|BI|PC|AP]
     pkp catalog find <texto>
+    pkp save read [--all] [--nombres [--idioma es]]
+    pkp save write --slot N [--nombres] [--dry-run | --yes]
 
 Todos los comandos que escriben tienen `--dry-run` por defecto y ninguno escribe
 en el dump original.
@@ -28,7 +35,9 @@ import os
 import struct
 import sys
 
-from . import paths, tables, fdata, catalog, objdb, texcmd, g1t, anim, snd
+from . import paths, tables, fdata, catalog, objdb, texcmd, g1t, anim, snd, srst
+from . import kidstask
+from . import nombres as nombresmod
 from .container import (
     DEFAULT_BLOCK_SIZE,
     entry_block_size,
@@ -43,11 +52,25 @@ from .mod import (
     ModError,
     UsageError,
     apply_mod,
+    comprobar_originales,
+    desinstalar,
+    doctor,
+    empaquetar,
+    estado,
+    instalar,
     load_mod,
     merge_mods,
     validate,
 )
 from .mod.manifest import ContainerView
+from .mod.example import escribir as escribir_ejemplo
+from .mod.overlay import (
+    aviso_separador,
+    destino_por_defecto,
+    img_por_defecto,
+    leer_registro,
+    linea_relativa,
+)
 from .mod import types as mt
 from . import save as savemod
 
@@ -144,6 +167,25 @@ def _parse_rows(arg: str | None, count: int) -> tuple[int, int]:
     return max(0, start), min(count, end)
 
 
+def _cabecera_derivada(args, spec, blob):
+    """`check_header` + geometria derivada cuando el contenedor es modificado.
+
+    El defecto sigue siendo estricto: sin `--modificado` un `count` distinto del
+    declarado lanza `TableError` aqui, y asi se queda (docs/AÑADIR-FILAS.md).
+    Con la bandera, la tabla se lee con el count real (`tables.con_conteo`) y se
+    avisa en la salida para que nadie lea esa geometria como la del dump.
+    """
+    count, version = tables.check_header(
+        spec, blob, modificado=getattr(args, "modificado", False))
+    if count != spec.count:
+        declarado = spec.count
+        spec = tables.con_conteo(spec, count)
+        out(sys.stdout, "  aviso: count del header %d != %d declarado "
+                        "(contenedor modificado: geometria derivada del header)"
+            % (count, declarado))
+    return spec, count, version
+
+
 def cmd_table(args) -> int:
     spec = tables.get(args.table)
     container = paths.resolve_container(args.container)
@@ -156,7 +198,7 @@ def cmd_table(args) -> int:
         for line in hexdump(blob[:256]):
             out(sys.stdout, line)
         return EXIT_OK
-    count, version = tables.check_header(spec, blob)
+    spec, count, version = _cabecera_derivada(args, spec, blob)
     out(sys.stdout, "%s" % tables.table_name(spec.index))
     out(sys.stdout, "  header %d B  count %d  version %d  stride %d  "
                     "confianza %s" % (spec.header, count, version, spec.stride,
@@ -186,7 +228,7 @@ def cmd_row(args) -> int:
     if spec is None:
         raise UsageError("#%d no tiene geometria declarada: usa `pkp table %d`"
                          % (args.table, args.table), code="usage")
-    count, version = tables.check_header(spec, blob)
+    spec, count, version = _cabecera_derivada(args, spec, blob)
     if spec.kind == "text":
         slots, terminated = tables.parse_pool(spec, blob)
         out(sys.stdout, "#%d textos %s: count %d, pool en %d, %d slots (terminado=%s)"
@@ -204,6 +246,8 @@ def cmd_row(args) -> int:
             data = slots[ordinal]
             out(sys.stdout, "  +%d  %d B  sha256 %s" % (slot, len(data),
                                                         hashlib.sha256(data).hexdigest()[:12]))
+            if getattr(args, "texto", False):
+                out(sys.stdout, "       texto: %s" % data.decode("utf-8", "replace"))
         bloque = tables.block_slots(spec, slots, args.row)
         out(sys.stdout, "  bloque  %d B en %d slots  sha256 %s"
             % (len(b"".join(bloque)), len(bloque),
@@ -282,6 +326,7 @@ TEMPLATE = {
     "requires": [],
     "edits": [],
     "text": [],
+    "romfs": [],
 }
 
 
@@ -306,8 +351,36 @@ def cmd_mod_new(args) -> int:
         fh.write("\n")
     out(sys.stdout, "mod nuevo: %s" % manifest)
     out(sys.stdout, "  md5 del contenedor tomados de %s" % container.dir)
-    out(sys.stdout, "  siguiente paso: rellena 'edits' o 'text' y ejecuta "
+    out(sys.stdout, "  siguiente paso: rellena 'edits', 'text' o 'romfs' y ejecuta "
                     "`pkp mod validate %s`" % target)
+    return EXIT_OK
+
+
+def cmd_mod_example(args) -> int:
+    """`pkp mod example`: un mod valido con bytes propios, para seguir las paginas."""
+    destino = args.destino or os.path.join("build", "ejemplo-mod")
+    try:
+        hecho = escribir_ejemplo(destino, args.container, forzar=args.forzar)
+    except FileExistsError as exc:
+        raise UsageError(str(exc), code="usage") from None
+    except (OSError, ModError) as exc:
+        raise ModError(str(exc), code="io", where=destino) from None
+    if args.json:
+        json.dump(hecho, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "mod de ejemplo: %s" % hecho["dir"])
+    out(sys.stdout, "  mod.json")
+    out(sys.stdout, "  payload/%s  (%d B nuestros)" % (hecho["path"], hecho["bytes"]))
+    out(sys.stdout, "  romfs[0].path = %s" % hecho["path"])
+    out(sys.stdout)
+    out(sys.stdout, "siguiente paso:")
+    out(sys.stdout, "  python pkp.py mod validate %s" % destino)
+    out(sys.stdout, "  python pkp.py mod pack %s --img <RomFS.img>" % destino)
+    if set(hecho["container_md5"].values()) == {"0" * 32}:
+        out(sys.stdout)
+        out(sys.stdout, "los md5 del contenedor son ceros: no hay copia configurada (PKP_ROMFS)")
+        out(sys.stdout, "ni se paso --container; con un contenedor real `validate` los compararia")
     return EXIT_OK
 
 
@@ -318,17 +391,24 @@ def cmd_mod_validate(args) -> int:
     if container is not None and not os.path.isfile(container.idx):
         container = None
     report = validate(mod, container, check_expect=not args.no_expect)
+    img = args.img or img_por_defecto()
+    problemas = comprobar_originales(mod, img) if (img and mod.romfs) else []
+    for problema in problemas:
+        report.error("mod.romfs.original", problema)
     doc = {"mod": mod.name, "version": mod.version, "manifest": mod.manifest,
            "container": container.dir if container else None,
-           "edits": len(mod.edits), "text": len(mod.texts),
+           "edits": len(mod.edits), "text": len(mod.texts), "romfs": len(mod.romfs),
            **report.as_dict()}
     if args.json:
         json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
         out(sys.stdout)
     else:
-        out(sys.stdout, "mod: %s@%s  (%d ediciones de bytes, %d de texto)"
-            % (mod.name, mod.version, len(mod.edits), len(mod.texts)))
+        out(sys.stdout, "mod: %s@%s  (%d ediciones de bytes, %d de texto, %d fichero(s) "
+                        "de overlay)"
+            % (mod.name, mod.version, len(mod.edits), len(mod.texts), len(mod.romfs)))
         out(sys.stdout, "  contenedor: %s" % (doc["container"] or "(no comprobado)"))
+        if mod.romfs and not img:
+            out(sys.stdout, "  img: (sin --img: no se comprueban los original_sha256)")
         print_report(report)
         out(sys.stdout, "resultado: %s (%d errores, %d avisos)"
             % ("OK" if report.ok else "INVALIDO", len(report.errors),
@@ -426,6 +506,148 @@ def _print_apply(result: dict, write: bool) -> None:
     out(sys.stdout, "resultado: %s" % ("OK" if result["ok"] else "FALLIDO"))
 
 
+def cmd_mod_pack(args) -> int:
+    img = args.img or img_por_defecto()
+    result = empaquetar(args.mod, salida=args.out, img=img)
+    if args.json:
+        json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "mod: %s@%s" % (result["mod"], result["version"]))
+    out(sys.stdout, "img: %s" % (result["img"] or "(sin --img: no se anota el original)"))
+    for f in result["files"]:
+        out(sys.stdout, "  %-9s %10d B  sha256 %s…  ruta %s"
+            % (f["nota"] or "cubre", f["size"], f["sha256"][:12], f["path"]))
+        out(sys.stdout, "  %-9s %10s     original %s"
+            % ("", "", (f["original_sha256"] or "-")[:12]))
+    for aviso in result["warnings"]:
+        out(sys.stdout, "aviso: %s" % aviso)
+    out(sys.stdout, "paquete: %s" % result["package"])
+    out(sys.stdout, "sha256 : %s" % result["sha256"])
+    return EXIT_OK
+
+
+def _overlay(args) -> str:
+    store = args.overlay or destino_por_defecto()
+    if not store:
+        raise UsageError("falta --overlay <carpeta del overlay> (o PKP_OVERLAY)", code="usage")
+    return store
+
+
+def cmd_mod_install(args) -> int:
+    result = instalar(args.origen, _overlay(args), img=args.img or img_por_defecto(),
+                      crear=args.crear, primero=args.primero, dry_run=args.dry_run,
+                      forzar=args.forzar)
+    if args.json:
+        json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "mod: %s@%s  ->  %s%s"
+        % (result["mod"], result["version"], result["dir"],
+           "   [dry-run]" if result["dry_run"] else ""))
+    for f in result["files"]:
+        out(sys.stdout, "  %-6s %10d B  sha256 %s…  %s"
+            % (f["nota"] or "cubre", f["size"], f["sha256"][:12], f["path"]))
+    for c in result["conflictos"]:
+        out(sys.stdout, "aviso: conflicto: %s ya lo instala %s; gana el que este antes en "
+                        "DM_ROMFS_OVERLAY" % (c["path"], c["con"]))
+    for aviso in result["avisos"]:
+        out(sys.stdout, "aviso: %s" % aviso)
+    if not result["dry_run"]:
+        out(sys.stdout, "servido: %s"
+            % ", ".join("%s -> %s %s" % (s["path"], s["origen"], s["donde"])
+                        for s in result["servido"]))
+        out(sys.stdout, "%s=%s" % ("DM_ROMFS_OVERLAY", result["overlay"]))
+        registro = leer_registro(result["store"])
+        out(sys.stdout, "relativo al cwd: %s" % linea_relativa(result["store"], registro))
+        aviso = aviso_separador(result["store"], registro)
+        if aviso:
+            out(sys.stdout, "aviso: %s" % aviso)
+    return EXIT_OK
+
+
+def cmd_mod_uninstall(args) -> int:
+    result = desinstalar(args.mod, _overlay(args), img=args.img or img_por_defecto(),
+                         dry_run=args.dry_run, forzar=args.forzar,
+                         permitir_sin_verificar=args.sin_verificar)
+    if args.json:
+        json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK if result["ok"] else EXIT_INVALID
+    out(sys.stdout, "mod: %s  (%d fichero(s))%s"
+        % (result["mod"], result["files"], "   [dry-run]" if result["dry_run"] else ""))
+    for v in result["verificacion"]:
+        out(sys.stdout, "  %-14s %s" % (v["estado"], v["path"]))
+        if v["servido"]["origen"] == "img":
+            out(sys.stdout, "  %-14s img entrada %s, sha256 %s…"
+                % ("", v["servido"]["indice"], (v["servido"]["sha256"] or "")[:12]))
+    out(sys.stdout, "restaurados: %d  sombreados por otro mod: %d  sin original: %d"
+        % (result["restaurados"], result["sombreados"], result["sin_original"]))
+    out(sys.stdout, "resultado: %s" % ("OK" if result["ok"] else "FALLIDO"))
+    return EXIT_OK if result["ok"] else EXIT_INVALID
+
+
+def cmd_mod_status(args) -> int:
+    result = estado(_overlay(args), img=args.img or img_por_defecto())
+    if args.json:
+        json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    if not result["mods"]:
+        out(sys.stdout, "vacio: %s" % result["store"])
+        return EXIT_OK
+    out(sys.stdout, "almacen: %s" % result["store"])
+    for mod in result["mods"]:
+        out(sys.stdout, "%d. %s@%s  (%d fichero(s), instalado %s)"
+            % (mod["orden"], mod["name"], mod["version"], len(mod["files"]),
+               mod["installed_at"] or "?"))
+        for f in mod["files"]:
+            s = f["servido"]
+            estado_txt = ("overlay" if s["origen"] == "overlay" else
+                          "img entrada %s" % s["indice"] if s["origen"] == "img" else "nada")
+            out(sys.stdout, "   %10s B  %-40s  sirve: %-14s %s"
+                % (f["size"], f["path"], estado_txt,
+                   "" if s["origen"] == "overlay" else (s["sha256"] or "")[:12]))
+    if result["conflictos"]:
+        out(sys.stdout, "conflictos: %d ruta(s) que sirven dos o mas mods"
+            % len(result["conflictos"]))
+        for c in result["conflictos"]:
+            out(sys.stdout, "  %s lo sirven %d mods (%s); gana %s%s"
+                % (c["path"], len(c["mods"]), ", ".join(c["mods"]), c["gana"],
+                   " — mismos bytes" if c["mismos_bytes"] else " — bytes distintos"))
+    else:
+        out(sys.stdout, "conflictos: ninguno")
+    out(sys.stdout, "DM_ROMFS_OVERLAY=%s" % result["overlay"])
+    out(sys.stdout, "relativo al cwd: %s" % result["overlay_relativo"])
+    if result["aviso"]:
+        out(sys.stdout, "aviso: %s" % result["aviso"])
+    return EXIT_OK
+
+
+def cmd_mod_doctor(args) -> int:
+    # `--container` es una referencia **declarada** por quien ejecuta: si el mod se
+    # hizo para otro build, es un FALLO. `PKP_ROMFS` es el contenedor por defecto del
+    # kit y solo se compara como aviso: puede ser otro dump y el overlay carga igual.
+    entorno = None if args.container else os.environ.get("PKP_ROMFS")
+    result = doctor(_overlay(args), img=args.img or img_por_defecto(),
+                    container=args.container, container_entorno=entorno)
+    if args.json:
+        json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK if result["ok"] else EXIT_INVALID
+    for c in result["checks"]:
+        etiqueta = "ok  " if c["ok"] else ("FALLO" if c["fatal"] else "aviso")
+        out(sys.stdout, "%-5s %-46s %s" % (etiqueta, c["check"], c["detail"]))
+    if result.get("overlay"):
+        out(sys.stdout, "DM_ROMFS_OVERLAY=%s" % result["overlay"])
+        out(sys.stdout, "relativo al cwd: %s" % result["overlay_relativo"])
+    veredicto = ("FALLIDO" if not result["ok"] else
+                 "sano con avisos" if result.get("avisos") else "sano")
+    out(sys.stdout, "resultado: %s (%d fallo(s), %d aviso(s))"
+        % (veredicto, result.get("fallos", 0), result.get("avisos", 0)))
+    return EXIT_OK if result["ok"] else EXIT_INVALID
+
+
 class _PseudoReport:
     def __init__(self, issues):
         self.issues = [_Issue(i) for i in issues]
@@ -445,11 +667,49 @@ class _Issue:
 # Comandos de save y progreso
 # --------------------------------------------------------------------------
 
+def _preparar_salida_para_nombres() -> None:
+    """Que un nombre que la consola no sepa escribir no tumbe la lista.
+
+    El texto de las tablas es UTF-8. Si `stdout` no lo es —consola de Windows en cp1252
+    con la salida redirigida a un fichero, que es el caso de `--idioma jp|kr|zh-*`— Python
+    lanza `UnicodeEncodeError` a mitad del inventario. Con `backslashreplace` el caracter
+    sale como `\\uXXXX`: no se inventa el nombre y la lista sale entera. Cuando el flujo
+    ya es UTF-8 (una consola normal) no cambia ni un byte.
+    """
+    stream = sys.stdout
+    reconfigurar = getattr(stream, "reconfigure", None)
+    if reconfigurar is not None:
+        try:
+            reconfigurar(errors="backslashreplace")
+        except (ValueError, OSError):  # pragma: no cover - flujo cerrado o sin buffer
+            pass
+
+
+def _indice_de_nombres(args) -> "nombresmod.NameIndex":
+    """Indice `id -> nombre` para esta ejecucion (una sola lectura de las dos tablas).
+
+    Se construye al vuelo desde el contenedor (`--container` o `PKP_ROMFS`): sin el
+    dump no hay nombres y `paths.ContainerNotFound` lo dice con las dos formas de
+    apuntarlo. No se cachea en disco ni en fichero: el texto solo se imprime.
+    """
+    return nombresmod.NameIndex.desde_contenedor(
+        args.container, language=args.idioma,
+        modificado=getattr(args, "modificado", False))
+
+
 def cmd_save_read(args) -> int:
+    if not args.nombres and args.idioma != nombresmod.IDIOMA_POR_DEFECTO:
+        raise UsageError("--idioma solo tiene efecto con --nombres", code="usage")
     page = savemod.open_page(args.save, args.page)
     items = savemod.read_items(page)
+    nombres = _indice_de_nombres(args) if args.nombres else None
+    if nombres is not None:
+        _preparar_salida_para_nombres()
     doc = page.summary()
     doc["items"] = [r.as_dict() for r in items]
+    if nombres is not None:
+        for entrada, record in zip(doc["items"], items):
+            entrada["nombre"] = nombres.nombre(record.item_id)
     doc["occupied"] = sum(1 for r in items if r.occupied)
     doc["distinct_ids"] = len({r.item_id for r in items if r.occupied})
     if args.json:
@@ -469,7 +729,13 @@ def cmd_save_read(args) -> int:
         % (doc["occupied"], len(items), doc["distinct_ids"]))
     for record in items:
         if record.occupied or args.all:
-            out(sys.stdout, "  %s" % record)
+            if nombres is None:
+                out(sys.stdout, "  %s" % record)
+            else:
+                # Los textos del juego solo salen aqui, en tiempo de ejecucion
+                # (docs/NORMA-CONTENIDO-Y-PUBLICACION.md §1). Nada va a disco.
+                out(sys.stdout, "  %s  %s"
+                    % (record, nombres.nombre(record.item_id)))
     return EXIT_OK
 
 
@@ -479,20 +745,55 @@ def cmd_save_write(args) -> int:
     if args.id is None and args.count is None and args.variant is None:
         raise UsageError("nada que escribir: pasa al menos uno de --id, --count, "
                          "--variant", code="usage")
+    if not args.nombres and args.idioma != nombresmod.IDIOMA_POR_DEFECTO:
+        raise UsageError("--idioma solo tiene efecto con --nombres", code="usage")
     page = savemod.open_page(args.save, args.page)
     new_payload = savemod.items.with_item(page, args.slot, item_id=args.id,
                                           count=args.count, variant=args.variant)
+    cambio = None
+    if args.nombres:
+        # Escribir a ciegas sobre un id es como se rompe una partida: el hueco y el
+        # objeto van delante del resultado, tambien en dry-run.
+        antes = savemod.read_items(page)[args.slot]
+        nuevo_id = antes.item_id if args.id is None else args.id
+        nuevo_count = antes.count if args.count is None else args.count
+        indice = _indice_de_nombres(args)
+        _preparar_salida_para_nombres()
+        cambio = {
+            "slot": args.slot,
+            "id_antes": antes.item_id, "id_despues": nuevo_id,
+            "cantidad_antes": antes.count, "cantidad_despues": nuevo_count,
+            "nombre_antes": indice.nombre(antes.item_id),
+            "nombre_despues": indice.nombre(nuevo_id),
+        }
     result = savemod.write_payload(page, new_payload, target=args.target,
                                   dry_run=not args.yes,
                                   allow_live_save=args.allow_live_save,
                                   level=args.level, strategy=args.strategy,
                                   memlevel=args.memlevel)
     if args.json:
-        json.dump(result.as_dict(), sys.stdout, indent=2, ensure_ascii=False)
+        doc = result.as_dict()
+        if cambio is not None:
+            doc["cambio"] = cambio
+        json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
         out(sys.stdout)
         return EXIT_OK
+    if cambio is not None:
+        _print_cambio(cambio)
     _print_write(result)
     return EXIT_OK
+
+
+def _print_cambio(cambio: dict) -> None:
+    """Que hueco y que objeto se va a tocar (solo con `--nombres`)."""
+    out(sys.stdout, "cambio    : hueco %d   id %d -> %d   cant %d -> %d"
+        % (cambio["slot"], cambio["id_antes"], cambio["id_despues"],
+           cambio["cantidad_antes"], cambio["cantidad_despues"]))
+    if cambio["id_antes"] == cambio["id_despues"]:
+        out(sys.stdout, "objeto    : %s" % cambio["nombre_antes"])
+    else:
+        out(sys.stdout, "objeto    : %s -> %s"
+            % (cambio["nombre_antes"], cambio["nombre_despues"]))
 
 
 def _print_write(result: savemod.WriteResult) -> None:
@@ -633,6 +934,52 @@ def cmd_fdata_extract(args) -> int:
         out(sys.stdout, "  0x%08x  %10d B  %s  (desde 0x%x de %s)"
             % (entry.name_hash, os.path.getsize(destino), os.path.basename(destino),
                entry.offset, os.path.basename(ruta)))
+    return EXIT_OK
+
+
+def _hex_u32(arg: str) -> int:
+    """Un u32 en hex, con o sin `0x` (para `--name-hash` y `--flags`)."""
+    texto = arg.strip()
+    try:
+        valor = int(texto[2:] if texto.lower().startswith("0x") else texto, 16)
+    except ValueError:
+        raise UsageError(
+            "esperaba un u32 en hex, no %r\n  ejemplo: 0xca806e59" % arg,
+            code="usage") from None
+    if not 0 <= valor <= 0xFFFFFFFF:
+        raise UsageError("%r se sale de 32 bits" % arg, code="usage")
+    return valor
+
+
+def cmd_fdata_inject(args) -> int:
+    if not os.path.isfile(args.file):
+        raise FileNotFoundError("no existe el fichero que se inyecta: %s" % args.file)
+    with open(args.file, "rb") as fh:
+        payload = fh.read()
+    resultado = fdata.inject(args.fdata, args.out, args.name_hash, payload,
+                             route=args.route, flags=args.flags)
+    if args.json:
+        json.dump(resultado.as_dict(), sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    antes = resultado.before
+    out(sys.stdout, "entrada 0x%08x (%s) de %s"
+        % (antes.name_hash, antes.type_name, os.path.abspath(args.fdata)))
+    out(sys.stdout, "  antes   : entry %d = 48 cabecera + %d metadatos + %d comprimidos"
+        " -> %d crudos, flags 0x%08x"
+        % (antes.entry_size, antes.metadata_size, antes.compressed_size,
+           antes.uncompressed_size, antes.flags))
+    forma = "crudos (compressed_size == uncompressed_size)" if args.route == "raw" \
+        else "comprimidos"
+    out(sys.stdout, "  despues : entry %d = 48 cabecera + %d metadatos + %d %s,"
+        " flags 0x%08x"
+        % (resultado.entry_size, resultado.metadata_size,
+           resultado.compressed_size, forma, resultado.flags))
+    out(sys.stdout, "  fichero : %d B -> %d B (%+d)"
+        % (os.path.getsize(args.fdata), resultado.repack.size,
+           resultado.repack.size - os.path.getsize(args.fdata)))
+    out(sys.stdout, "  sha256  : %s" % resultado.repack.sha256)
+    out(sys.stdout, "  escrito : %s" % os.path.abspath(args.out))
     return EXIT_OK
 
 
@@ -1103,6 +1450,84 @@ def cmd_objdb_id(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# Grafo de tareas: la entrada `kidstask` (`_TGK0000`)
+# --------------------------------------------------------------------------
+
+def cmd_kidstask(args) -> int:
+    """Los nodos del grafo de tareas con sus enlaces y, si hay, su tipo."""
+    try:
+        if args.archivo:
+            datos = kidstask.leer_fichero(args.archivo)
+            origen = args.archivo
+        else:
+            romfs = args.container or paths.configured_romfs()
+            datos, origen = kidstask.leer_de_romfs(romfs)
+        doc = kidstask.parse(datos, origen=origen)
+    except kidstask.KidstaskError as exc:
+        out(sys.stderr, "ERROR: %s" % exc)
+        return EXIT_INVALID
+
+    # Nombres: `--tipos`, o el YAML por defecto del Paso 0 si esta. Sin el
+    # YAML no se falla: se avisa por stderr y siguen los hashes.
+    ruta_yml = args.tipos
+    if ruta_yml is None and os.path.isfile(kidstask.YML_DEFECTO):
+        ruta_yml = kidstask.YML_DEFECTO
+    try:
+        if ruta_yml is None:
+            out(sys.stderr, "aviso: sin kidstypeinfodb.yml: solo hashes "
+                "(--tipos <ruta>; ver docs/KIDSTASK.md)")
+            tipos, props = {}, {}
+        else:
+            tipos, props = kidstask.cargar_nombres(ruta_yml)
+    except kidstask.KidstaskError as exc:
+        out(sys.stderr, "ERROR: %s" % exc)
+        return EXIT_INVALID
+
+    if args.json:
+        json.dump(doc.as_dict(tipos=tipos, props=props), sys.stdout,
+                  indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+
+    cab = doc.cabecera
+    resueltos = sum(1 for n in doc.nodos
+                    if doc.nombre_de_tipo(n.tipo_hash, tipos, props))
+    out(sys.stdout, "kidstask: %s (%d B)" % (origen, doc.bytes_totales))
+    out(sys.stdout, "%s | cabecera_tamano %d | cabecera_de_registro %d | "
+        "recuento %d | cubre el fichero: %s"
+        % (cab["firma"], cab["cabecera_tamano"], cab["cabecera_de_registro"],
+           cab["recuento"], "si" if doc.cubre_el_fichero else "NO"))
+    out(sys.stdout, "campo_0x14 0x%08x | campo_0x18 %d | campo_0x1c %d%s"
+        % (cab["campo_0x14"], cab["campo_0x18"], cab["campo_0x1c"],
+           " (= bytes del fichero)" if cab["campo_0x1c"] == doc.bytes_totales
+           else ""))
+    out(sys.stdout, "nodos: %d  aristas: %d  tipos resueltos: %d/%d"
+        % (len(doc.nodos), len(doc.aristas()), resueltos, len(doc.nodos)))
+    out(sys.stdout, "")
+    out(sys.stdout, " #  offset   tam   id          h1          tipo")
+    for n in doc.nodos:
+        nombre = doc.nombre_de_tipo(n.tipo_hash, tipos, props) or "-"
+        out(sys.stdout, "%02d  0x%03x  %4d  0x%08x  0x%08x  %s"
+            % (n.indice, n.offset, n.tamano, n.id, n.tipo_hash, nombre))
+        out(sys.stdout, "    N=%d  enlaces=%s"
+            % (len(n.propiedades), list(n.enlaces)))
+        if args.props:
+            for p in n.propiedades:
+                nombre_p = props.get(p.hash, "-")
+                if kidstask.UNIDAD[p.tipo] == 4:
+                    vals = " ".join("0x%08x" % v for v in p.valores)
+                else:
+                    vals = " ".join("%02x" % v for v in p.valores)
+                out(sys.stdout, "      tipo=%d len=%d 0x%08x %s  %s"
+                    % (p.tipo, p.tamano, p.hash, nombre_p, vals))
+    out(sys.stdout, "")
+    out(sys.stdout, "aristas (%d): %s"
+        % (len(doc.aristas()),
+           " ".join("%02d->%02d" % (i, j) for i, j in doc.aristas())))
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------
 # Sonido: bancos ASRS/KTSR de los `.srsa`
 # --------------------------------------------------------------------------
 
@@ -1113,28 +1538,94 @@ def _snd_line(stream) -> str:
                stream.sound_id, stream.name))
 
 
+def _srst_track(serst, stream, origen: str):
+    """La pista del `.srst` que corresponde a un stream **externo** del banco.
+
+    El emparejamiento es exacto y sin heuristica: mismo `data_offset` (relativo
+    al KTSR de los dos ficheros), mismo `data_size` y mismo `sound id`. Si algo
+    no cuadra, se dice en vez de escribir en la pista equivocada.
+    """
+    if not stream.external:
+        raise srst.SrstError(
+            "el stream %d no es externo: su audio esta dentro del banco y `--srst` "
+            "no pinta nada" % stream.index)
+    track = serst.by_data_offset(stream.data_offset)
+    if track is None:
+        raise srst.SrstError(
+            "el stream %d (data_offset 0x%x) no tiene pista en %s: no son el mismo "
+            "banco y el mismo `.srst`" % (stream.index, stream.data_offset, origen))
+    if track.sound_id != stream.sound_id or track.data_size != stream.data_size:
+        raise srst.SrstError(
+            "la pista %d de %s no es la del stream %d del banco: sound id 0x%08x/0x%08x, "
+            "data_size %d/%d" % (track.index, origen, stream.index, track.sound_id,
+                                 stream.sound_id, track.data_size, stream.data_size))
+    return track
+
+
+def _srst_line(track) -> str:
+    return ("#%-4d %-8s %3d ch %6d Hz %9d muestras %7.3f s  %10d B  id %-10d externo"
+            % (track.index, track.codec, track.channels, track.sample_rate,
+               track.num_samples, track.duration, track.data_size, track.sound_id))
+
+
 def cmd_snd_list(args) -> int:
     banco, _ = snd.read_bank(args.bank)
+    serst = None
+    if getattr(args, "srst", None):
+        serst, datos_srst = srst.read(args.srst)
     if args.json:
         doc = banco.as_dict()
         doc.update({"codecs": banco.codecs,
                     "streams": [s.as_dict() for s in banco.streams]})
+        if serst is not None:
+            doc["srst"] = serst.as_dict()
+            doc["srst"]["path"] = os.path.abspath(args.srst)
+            doc["tracks"] = [t.as_dict() for t in serst.tracks]
         json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
         out(sys.stdout)
         return EXIT_OK
     out(sys.stdout, "%s  %d B  audio_id 0x%08x  %d chunks  %d streams  %s"
         % (os.path.abspath(args.bank), banco.size, banco.audio_id,
            len(banco.chunks), len(banco.streams), banco.codecs))
+    if serst is not None:
+        out(sys.stdout, "%s  %d pistas  clave %d B  audio_id 0x%08x"
+            % (os.path.abspath(args.srst), len(serst.tracks), len(serst.key),
+               serst.audio_id))
     for stream in banco.streams:
+        if stream.external and serst is not None:
+            track = serst.by_data_offset(stream.data_offset)
+            if track is not None:
+                out(sys.stdout, _srst_line(track))
+                continue
         out(sys.stdout, _snd_line(stream))
     return EXIT_OK
 
 
 def cmd_snd_extract(args) -> int:
     escritos = snd.extract(args.bank, args.out, args.stream or None)
+    externos: list[tuple[srst.Track, str]] = []
+    if getattr(args, "srst", None):
+        from . import paths as pkp_paths
+
+        serst, datos_srst = srst.read(args.srst)
+        banco, _ = snd.read_bank(args.bank)
+        pedidos = banco.streams if not args.stream else [banco.stream(i) for i in args.stream]
+        base = os.path.splitext(os.path.basename(args.bank))[0]
+        for stream in pedidos:
+            if not stream.external:
+                continue
+            track = _srst_track(serst, stream, args.srst)
+            destino = os.path.join(args.out, "%s.%03d.%s"
+                                   % (base, track.index, track.codec))
+            pkp_paths.guard_writable(destino)
+            with open(destino, "wb") as salida:
+                salida.write(srst.track_plain(datos_srst, track.index))
+            externos.append((track, destino))
+        escritos = list(escritos) + [(t, p) for t, p in externos]
     if args.json:
         json.dump({
             "bank": os.path.abspath(args.bank),
+            "srst": os.path.abspath(args.srst) if getattr(args, "srst", None) else None,
             "out": os.path.abspath(args.out),
             "files": [{"stream": s.as_dict(), "written": os.path.abspath(p),
                        "size": os.path.getsize(p),
@@ -1145,12 +1636,85 @@ def cmd_snd_extract(args) -> int:
     out(sys.stdout, "%d streams escritos en %s"
         % (len(escritos), os.path.abspath(args.out)))
     for stream, destino in escritos:
+        nombre = getattr(stream, "name", "externo")
         out(sys.stdout, "  %s  %10d B  %s"
-            % (os.path.basename(destino), os.path.getsize(destino), stream.name))
+            % (os.path.basename(destino), os.path.getsize(destino), nombre))
+    return EXIT_OK
+
+
+def _snd_replace_externo(args) -> int:
+    """Sustituye audio de un stream **externo**: escribe sobre el `.srst`.
+
+    Se exige el banco (`.srsa`) ademas del `.srst` para traducir `--stream N`
+    al sitio exacto: el numero de stream es el del banco, no se adivina por
+    orden del fichero.
+    """
+    destino = args.out or args.srst
+    if destino == args.srst and not args.in_place:
+        out(sys.stderr,
+            "ERROR: para escribir sobre el propio `.srst` hace falta --in-place\n"
+            "  (deja una copia <.srst>.orig la primera vez); si no, usa -o <salida>")
+        return EXIT_USAGE
+    banco, _ = snd.read_bank(args.bank)
+    serst, datos = srst.read(args.srst)
+    antes = paths.sha256_file(args.srst)
+
+    if args.swap:
+        a = _srst_track(serst, banco.stream(args.swap[0]), args.srst)
+        b = _srst_track(serst, banco.stream(args.swap[1]), args.srst)
+        modificado = srst.swap_tracks(datos, a.index, b.index)
+        detalle = {"swap": list(args.swap), "tracks": [a.index, b.index]}
+        descripcion = "intercambiadas las pistas %d y %d" % (a.index, b.index)
+    else:
+        track = _srst_track(serst, banco.stream(args.stream), args.srst)
+        with open(args.file, "rb") as fh:
+            plano = fh.read()
+        modificado = srst.with_track(datos, track.index, plano)
+        detalle = {"stream": args.stream, "track": track.index,
+                   "bytes": len(plano)}
+        descripcion = ("pista %d (stream %d): %d B escritos de %d"
+                       % (track.index, args.stream, len(plano), track.data_size))
+
+    srst.write_srst(destino, modificado)
+    despues = paths.sha256_file(destino)
+    verificado = srst.parse(modificado)
+    if len(verificado.tracks) != len(serst.tracks):
+        out(sys.stderr, "ERROR: el `.srst` resultante tiene %d pistas y tenia %d"
+            % (len(verificado.tracks), len(serst.tracks)))
+        return EXIT_INVALID
+    if args.json:
+        doc = {"bank": os.path.abspath(args.bank), "srst_before": os.path.abspath(args.srst),
+               "written": os.path.abspath(destino),
+               "sha256_before": antes, "sha256_after": despues,
+               "size_before": len(datos), "size_after": len(modificado),
+               "tracks": len(verificado.tracks),
+               "backup": destino + ".orig" if os.path.exists(destino + ".orig") else None}
+        doc.update(detalle)
+        json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "banco   : %s (stream %d, externo)"
+        % (os.path.abspath(args.bank), args.swap[0] if args.swap else args.stream))
+    out(sys.stdout, ".srst   : %s (%d pistas)" % (os.path.abspath(args.srst),
+                                                 len(serst.tracks)))
+    out(sys.stdout, "escrito : %s" % descripcion)
+    out(sys.stdout, "destino : %s" % os.path.abspath(destino))
+    out(sys.stdout, "sha256  : %s" % antes)
+    out(sys.stdout, "        -> %s" % despues)
+    out(sys.stdout, "tamano  : %d -> %d B (no se mueve ni un desplazamiento)"
+        % (len(datos), len(modificado)))
+    if os.path.exists(destino + ".orig"):
+        out(sys.stdout, "original: %s" % (destino + ".orig"))
     return EXIT_OK
 
 
 def cmd_snd_replace(args) -> int:
+    if getattr(args, "srst", None):
+        if args.from_banco or args.from_stream is not None:
+            out(sys.stderr, "ERROR: --from-banco/--from-stream son para bancos; "
+                            "con --srst usa --file (el flujo crudo ya extraido)")
+            return EXIT_USAGE
+        return _snd_replace_externo(args)
     if args.swap and (args.stream or args.file):
         out(sys.stderr, "ERROR: --swap no se combina con --stream/--file")
         return EXIT_USAGE
@@ -1208,10 +1772,95 @@ def cmd_snd_replace(args) -> int:
     return EXIT_OK
 
 
+def _snd_import_externo(args) -> int:
+    """Mete un WAV propio en un stream externo: codifica y escribe en el `.srst`."""
+    from . import audio as pkp_audio
+
+    destino = args.out or args.srst
+    if destino == args.srst and not args.in_place:
+        out(sys.stderr,
+            "ERROR: para escribir sobre el propio `.srst` hace falta --in-place\n"
+            "  (deja una copia <.srst>.orig la primera vez); si no, usa -o <salida>")
+        return EXIT_USAGE
+    banco, _ = snd.read_bank(args.bank)
+    serst, datos = srst.read(args.srst)
+    track = _srst_track(serst, banco.stream(args.stream), args.srst)
+    canales, rate = pkp_audio.read_wav_channels(args.wav)
+    if len(canales) != track.channels:
+        out(sys.stderr,
+            "ERROR: la pista %d es de %d canales y %s trae %d; no se mezcla solo\n"
+            "  (exporta el WAV con %d canales, p. ej. `-ac %d` en ffmpeg)"
+            % (track.index, track.channels, args.wav, len(canales),
+               track.channels, track.channels))
+        return EXIT_USAGE
+    if rate != track.sample_rate:
+        out(sys.stderr,
+            "ERROR: la pista va a %d Hz y el WAV a %d Hz; el kit no remuestrea\n"
+            "  (convierte el WAV a %d Hz, y que la cabecera del banco siga cuadrando)"
+            % (track.sample_rate, rate, track.sample_rate))
+        return EXIT_USAGE
+    antes = paths.sha256_file(args.srst)
+    muestras = len(canales[0])
+    try:
+        plano = srst.build_track(track, canales, args.loop)
+    except pkp_audio.AudioError as exc:
+        out(sys.stderr, "ERROR: %s" % exc)
+        return EXIT_INVALID
+    modificado = srst.with_track(datos, track.index, plano)
+    srst.write_srst(destino, modificado)
+    despues = paths.sha256_file(destino)
+
+    # segundo juez: se relee el fichero escrito, se descifra y se decodifica
+    verificado, datos2 = srst.read(destino)
+    nueva = verificado.track(track.index)
+    decodificado, campos = srst.decode_track(srst.track_plain(datos2, track.index))
+    # `ka1a_snr_db` compara PCM16 contra la escala -1..1 del decodificador
+    snr = [pkp_audio.ka1a_snr_db(canales[c], [v / 32768.0 for v in decodificado[c]])
+           for c in range(len(canales))]
+    frame = pkp_audio.ka1a_frame_size(track.bitrate_mode)
+    if args.json:
+        json.dump({
+            "bank": os.path.abspath(args.bank), "srst_before": os.path.abspath(args.srst),
+            "written": os.path.abspath(destino),
+            "sha256_before": antes, "sha256_after": despues,
+            "size_before": len(datos), "size_after": len(modificado),
+            "stream": args.stream, "track": nueva.as_dict(),
+            "wav": os.path.abspath(args.wav), "channels": len(canales),
+            "rate": rate, "samples": muestras,
+            "bitrate_mode": track.bitrate_mode,
+            "encoded_bytes": campos["tamano"],
+            "frames_per_channel": campos["tamano"] // (frame * len(canales)),
+            "snr_db": [round(v, 3) for v in snr],
+            "backup": destino + ".orig" if os.path.exists(destino + ".orig") else None,
+        }, sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK
+    out(sys.stdout, "WAV       : %s (%d muestras por canal, %d Hz, %d canales)"
+        % (os.path.abspath(args.wav), muestras, rate, len(canales)))
+    out(sys.stdout, "encoder   : ka1a propio (modo %+d, frame de %d B)"
+        % (track.bitrate_mode, frame))
+    out(sys.stdout, "codificado: %d B en %d frames por canal (SNR ida y vuelta %s)"
+        % (campos["tamano"], campos["tamano"] // (frame * len(canales)),
+           ", ".join("%.2f dB" % v for v in snr)))
+    out(sys.stdout, "pista     : %d (stream %d) %d Hz, %d muestras, %.3f s, bucle %d..%d"
+        % (nueva.index, args.stream, nueva.sample_rate, nueva.num_samples,
+           nueva.duration, nueva.loop_start, nueva.loop_end))
+    out(sys.stdout, "escrito   : %s" % os.path.abspath(destino))
+    out(sys.stdout, "sha256    : %s" % antes)
+    out(sys.stdout, "         -> %s" % despues)
+    out(sys.stdout, "tamano    : %d -> %d B (el `.srst` no cambia de tamano)"
+        % (len(datos), len(modificado)))
+    if os.path.exists(destino + ".orig"):
+        out(sys.stdout, "original  : %s" % (destino + ".orig"))
+    return EXIT_OK
+
+
 def cmd_snd_import(args) -> int:
     """Mete un WAV propio en un stream del banco (MS ADPCM o KA1A)."""
     from . import audio as pkp_audio
 
+    if getattr(args, "srst", None):
+        return _snd_import_externo(args)
     destino = args.out or args.bank
     if destino == args.bank and not args.in_place:
         out(sys.stderr,
@@ -1317,6 +1966,32 @@ def cmd_snd_import(args) -> int:
     return EXIT_OK
 
 
+def cmd_snd_revert(args) -> int:
+    """Deshace una sustitucion: restaura `<fichero>.orig` sobre `<fichero>`."""
+    respaldo = args.file + ".orig"
+    if not os.path.exists(respaldo):
+        out(sys.stderr,
+            "ERROR: no hay copia de la que volver: falta %s\n"
+            "  (la deja `--in-place` la primera vez que se escribe)" % respaldo)
+        return EXIT_USAGE
+    antes = paths.sha256_file(args.file)
+    restaurado, original = srst.revert(args.file)
+    if args.json:
+        json.dump({"file": os.path.abspath(args.file),
+                   "backup": os.path.abspath(respaldo),
+                   "sha256_before": antes, "sha256_restored": restaurado,
+                   "sha256_backup": original,
+                   "identical": restaurado == original},
+                  sys.stdout, indent=2, ensure_ascii=False)
+        out(sys.stdout)
+        return EXIT_OK if restaurado == original else EXIT_INVALID
+    out(sys.stdout, "modificado: %s" % antes)
+    out(sys.stdout, "restaurado: %s" % restaurado)
+    out(sys.stdout, "original  : %s" % original)
+    out(sys.stdout, "reversion exacta: %s" % ("si" if restaurado == original else "NO"))
+    return EXIT_OK if restaurado == original else EXIT_INVALID
+
+
 def cmd_snd_stat(args) -> int:
     rutas = snd.find_banks(args.dir)
     stats = snd.scan_folder(rutas)
@@ -1349,6 +2024,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--container", default=None,
                     help="carpeta del contenedor (por defecto PKP_ROMFS o ./romfs)")
     ap.add_argument("--json", action="store_true", help="salida JSON")
+    ap.add_argument("--modificado", action="store_true",
+                    help="contenedor derivado del dump: admite count por encima "
+                         "del declarado (docs/AÑADIR-FILAS.md)")
     # Permite escribir --container tambien despues del subcomando:
     #   pkp mod apply ejemplos/x --container build/copia
     common = argparse.ArgumentParser(add_help=False)
@@ -1356,6 +2034,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="carpeta del contenedor (igual que la opcion global)")
     common.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                         help="salida JSON (igual que la opcion global)")
+    common.add_argument("--modificado", action="store_true",
+                        default=argparse.SUPPRESS,
+                        help="contenedor derivado del dump (igual que la opcion global)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("info", help="que hay en el contenedor y que tablas conocemos",
@@ -1371,6 +2052,10 @@ def build_parser() -> argparse.ArgumentParser:
                        parents=[common])
     p.add_argument("table", type=int)
     p.add_argument("row", type=int)
+    p.add_argument("--texto", action="store_true",
+                   help="en tablas de texto, muestra los slots en claro ademas "
+                        "del sha256 (salida para terminal: no la volqueis a un "
+                        "fichero del repo, docs/NORMA-CONTENIDO-Y-PUBLICACION.md §2)")
     p.set_defaults(func=cmd_row)
 
     p = sub.add_parser("dump", help="escribir el payload descomprimido de una entrada",
@@ -1395,12 +2080,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dir", default=None)
     p.set_defaults(func=cmd_mod_new)
 
+    p = msub.add_parser("example", help="mod de ejemplo con bytes propios (las paginas)",
+                        parents=[common])
+    p.add_argument("destino", nargs="?", default=None,
+                   help="carpeta donde escribirlo (por defecto build/ejemplo-mod)")
+    p.add_argument("--forzar", action="store_true",
+                   help="escribe aunque el destino ya exista")
+    p.set_defaults(func=cmd_mod_example)
+
     p = msub.add_parser("validate", help="esquema, rangos, md5 y expect", parents=[common])
     p.add_argument("mod")
     p.add_argument("--no-expect", action="store_true",
                    help="no comparar expect contra el contenedor")
     p.add_argument("--no-container", action="store_true",
                    help="no abrir el contenedor (solo esquema)")
+    p.add_argument("--img", default=None,
+                   help="RomFS.img: comprueba los original_sha256 de romfs[] (o PKP_ROMFS_IMG)")
     p.set_defaults(func=cmd_mod_validate)
 
     p = msub.add_parser("merge", help="componer dos mods", parents=[common])
@@ -1424,6 +2119,58 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(no_backup=False)
     p.set_defaults(func=cmd_mod_apply)
 
+    p = msub.add_parser("pack", help="carpeta de trabajo -> paquete .pkmod instalable",
+                        parents=[common])
+    p.add_argument("mod", help="carpeta del mod (con mod.json y sus ficheros)")
+    p.add_argument("-o", "--out", default=None,
+                   help="carpeta del paquete (por defecto build/pkmod)")
+    p.add_argument("--img", default=None,
+                   help="RomFS.img para anotar el sha256 del original (o PKP_ROMFS_IMG)")
+    p.set_defaults(func=cmd_mod_pack)
+
+    p = msub.add_parser("install", help="deja el mod en el overlay, sin tocar el img",
+                        parents=[common])
+    p.add_argument("origen", help="carpeta del mod o paquete .pkmod")
+    p.add_argument("--overlay", default=None,
+                   help="carpeta del almacen de mods (o PKP_OVERLAY)")
+    p.add_argument("--img", default=None, help="RomFS.img (o PKP_ROMFS_IMG)")
+    p.add_argument("--crear", action="store_true",
+                   help="crea el almacen si no existe (por defecto se niega)")
+    p.add_argument("--primero", action="store_true",
+                   help="da prioridad a este mod (el primero gana en DM_ROMFS_OVERLAY)")
+    p.add_argument("--dry-run", action="store_true", help="cuenta sin escribir nada")
+    p.add_argument("--forzar", action="store_true",
+                   help="salta la comprobacion de 'el juego esta en marcha'")
+    p.set_defaults(func=cmd_mod_install)
+
+    p = msub.add_parser("uninstall", help="quita un mod y comprueba que vuelve el original",
+                        parents=[common])
+    p.add_argument("mod", help="nombre del mod instalado")
+    p.add_argument("--overlay", default=None,
+                   help="carpeta del almacen de mods (o PKP_OVERLAY)")
+    p.add_argument("--img", default=None,
+                   help="RomFS.img con el que se verifica el original (o PKP_ROMFS_IMG)")
+    p.add_argument("--dry-run", action="store_true", help="cuenta sin borrar nada")
+    p.add_argument("--forzar", action="store_true",
+                   help="borra aunque el overlay no coincida con el registro")
+    p.add_argument("--sin-verificar", dest="sin_verificar", action="store_true",
+                   help="acepta no poder demostrar que el original vuelve (sin --img)")
+    p.set_defaults(func=cmd_mod_uninstall)
+
+    p = msub.add_parser("status", help="que mods hay, quien sirve cada ruta y conflictos",
+                        parents=[common])
+    p.add_argument("--overlay", default=None,
+                   help="carpeta del almacen de mods (o PKP_OVERLAY)")
+    p.add_argument("--img", default=None, help="RomFS.img (o PKP_ROMFS_IMG)")
+    p.set_defaults(func=cmd_mod_status)
+
+    p = msub.add_parser("doctor", help="coherencia del almacen y del img",
+                        parents=[common])
+    p.add_argument("--overlay", default=None,
+                   help="carpeta del almacen de mods (o PKP_OVERLAY)")
+    p.add_argument("--img", default=None, help="RomFS.img (o PKP_ROMFS_IMG)")
+    p.set_defaults(func=cmd_mod_doctor)
+
     save = sub.add_parser("save", help="save: inventario y escritura con copia")
     ssub = save.add_subparsers(dest="savecmd", required=True)
 
@@ -1437,6 +2184,12 @@ def build_parser() -> argparse.ArgumentParser:
                         parents=[common])
     add_save_opts(p)
     p.add_argument("--all", action="store_true", help="incluye los huecos vacios")
+    p.add_argument("--nombres", "--name", dest="nombres", action="store_true",
+                   help="añade el nombre de cada objeto (necesita el contenedor: "
+                        "--container o PKP_ROMFS); sin la bandera la salida no cambia")
+    p.add_argument("--idioma", default=nombresmod.IDIOMA_POR_DEFECTO,
+                   choices=tuple(nombresmod.TEXT_TABLES),
+                   help="tabla de nombres que se usa con --nombres (por defecto es)")
     p.set_defaults(func=cmd_save_read)
 
     p = ssub.add_parser("write", help="escribir un hueco del inventario (dry-run por defecto)",
@@ -1447,6 +2200,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--count", type=int, default=None, help="cantidad 0..255")
     p.add_argument("--variant", type=int, default=None,
                    help="bits 13..31 del campo (variante/colocacion)")
+    p.add_argument("--nombres", "--name", dest="nombres", action="store_true",
+                   help="dice el hueco y el nombre del objeto que se va a tocar "
+                        "(necesita el contenedor: --container o PKP_ROMFS)")
+    p.add_argument("--idioma", default=nombresmod.IDIOMA_POR_DEFECTO,
+                   choices=tuple(nombresmod.TEXT_TABLES),
+                   help="tabla de nombres que se usa con --nombres (por defecto es)")
     p.add_argument("--target", default=None,
                    help="fichero a escribir (por defecto, sobre el mismo CMNDAT)")
     g = p.add_mutually_exclusive_group()
@@ -1497,6 +2256,23 @@ def build_parser() -> argparse.ArgumentParser:
                    help="tipo de entrada: nombre (kidsobjdb, g1t, ...) o hex 0x20a6a0bb")
     p.add_argument("--out", required=True, help="carpeta de salida (nunca dentro del romfs)")
     p.set_defaults(func=cmd_fdata_extract)
+
+    p = fdsub.add_parser("inject",
+                         help="meter un fichero en una entrada (rehace la copia del .fdata)",
+                         parents=[common])
+    p.add_argument("fdata", help=".fdata de partida (el del dump se abre en solo lectura)")
+    p.add_argument("--name-hash", dest="name_hash", required=True, type=_hex_u32,
+                   help="name_hash de la entrada que se sustituye, p. ej. 0xca806e59")
+    p.add_argument("--file", required=True,
+                   help="fichero con el contenido nuevo (p. ej. el .g1t recodificado)")
+    p.add_argument("--out", required=True,
+                   help="copia nueva del .fdata (nunca el del romfs, nunca el de partida)")
+    p.add_argument("--route", choices=("raw", "slot"), default="raw",
+                   help="raw: entrada cruda, sin comprimir (por defecto); "
+                        "slot: parche en sitio sin desplazar nada")
+    p.add_argument("--flags", type=_hex_u32, default=None,
+                   help="flags de la entrada nueva (por defecto, los del original)")
+    p.set_defaults(func=cmd_fdata_inject)
 
     tex = sub.add_parser("tex", help="texturas G1T: listar, censar, sacar a PNG y reinyectar")
     tsub = tex.add_subparsers(dest="texcmd", required=True)
@@ -1632,12 +2408,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("id", type=int, help="id del registro (campo +0x0C de su cabecera)")
     p.set_defaults(func=cmd_objdb_id)
 
+    p = sub.add_parser("kidstask",
+                       help="grafo de tareas (_TGK0000): nodos, enlaces y tipo",
+                       parents=[common])
+    p.add_argument("archivo", nargs="?", default=None,
+                   help="fichero .kidstask ya extraido; si se omite, la unica "
+                        "entrada del --container")
+    p.add_argument("--tipos", default=None,
+                   help="kidstypeinfodb.yml para los nombres (por defecto "
+                        "build/refs/fdata_dump/kidstypeinfodb.yml si existe)")
+    p.add_argument("--props", action="store_true",
+                   help="imprime tambien las propiedades de cada nodo")
+    p.set_defaults(func=cmd_kidstask)
+
     sn = sub.add_parser("snd", help="bancos de sonido .srsa (ASRS/KTSR): listar, extraer y sustituir")
     snsub = sn.add_subparsers(dest="sndcmd", required=True)
 
     p = snsub.add_parser("list", help="los streams del banco: codec, frecuencia, muestras, nombre",
                          parents=[common])
     p.add_argument("bank", help="fichero .srsa")
+    p.add_argument("--srst", help="fichero .srst: completa los streams externos con "
+                                  "su codec, frecuencia, muestras y bucle")
     p.set_defaults(func=cmd_snd_list)
 
     p = snsub.add_parser("extract", help="escribir el flujo crudo de cada stream",
@@ -1646,11 +2437,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", required=True, help="carpeta de salida (nunca dentro del romfs)")
     p.add_argument("--stream", type=int, action="append",
                    help="solo este stream (repetible); por defecto, todos")
+    p.add_argument("--srst", help="fichero .srst: extrae tambien los streams externos "
+                                  "(flujo ya descifrado)")
     p.set_defaults(func=cmd_snd_extract)
 
     p = snsub.add_parser("replace", help="sustituir audio: intercambiar dos streams o meter otro flujo",
                          parents=[common])
     p.add_argument("bank", help="fichero .srsa de partida")
+    p.add_argument("--srst", help="fichero .srst: el stream es externo y su audio vive ahi "
+                                  "(se escribe sobre el `.srst`, no sobre el banco)")
     p.add_argument("--swap", type=int, nargs=2, metavar=("A", "B"),
                    help="intercambiar de sitio los streams A y B (sin encoder)")
     p.add_argument("--stream", type=int, help="stream cuyo audio se sustituye")
@@ -1673,12 +2468,21 @@ def build_parser() -> argparse.ArgumentParser:
                         "modo de bitrate que ya tiene)")
     p.add_argument("--wav", required=True,
                    help="WAV PCM 16 bits mono; su frecuencia es la que se escribe en la cabecera")
+    p.add_argument("--srst", help="fichero .srst: el stream es externo y su audio vive ahi "
+                                  "(el WAV tiene que traer sus mismos canales y su misma "
+                                  "frecuencia)")
     p.add_argument("--loop", type=int, default=-1,
                    help="muestra donde empieza el bucle (-1 = sin bucle, por defecto)")
     p.add_argument("-o", "--out", help="fichero de salida (por defecto: el mismo, con --in-place)")
     p.add_argument("--in-place", action="store_true",
                    help="escribir sobre el banco (deja <banco>.orig la primera vez)")
     p.set_defaults(func=cmd_snd_import)
+
+    p = snsub.add_parser("revert",
+                         help="deshacer una sustitucion: restaura <fichero>.orig",
+                         parents=[common])
+    p.add_argument("file", help="banco .srsa o .srst que se habia modificado con --in-place")
+    p.set_defaults(func=cmd_snd_revert)
 
     p = snsub.add_parser("stat", help="codecs y tamanos de una carpeta de bancos",
                          parents=[common])
@@ -1721,6 +2525,9 @@ def main(argv: list[str] | None = None) -> int:
         out(sys.stderr, "ERROR: %s" % exc)
         return getattr(exc, "exit_code", EXIT_INVALID)
     except objdb.ObjDbError as exc:
+        out(sys.stderr, "ERROR: %s" % exc)
+        return getattr(exc, "exit_code", EXIT_INVALID)
+    except kidstask.KidstaskError as exc:
         out(sys.stderr, "ERROR: %s" % exc)
         return getattr(exc, "exit_code", EXIT_INVALID)
     except texcmd.TexError as exc:

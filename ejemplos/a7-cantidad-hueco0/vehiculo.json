@@ -1,0 +1,37 @@
+{
+  "vehiculo": "save",
+  "unidad": "A7",
+  "que_prueba": "Un valor del save (la cantidad de un objeto) se puede cambiar y se ve en el juego.",
+  "por_que_no_es_mod_json": "El formato mod.json escribe en el contenedor LD_C0_R.BIN/LI_C0_R.IDX, no en el save: docs/MOD-FORMAT.md 5 lo dice explicitamente ('What apply does not do: ... write to the save'). El vehiculo de una unidad del save es el comando, y su validacion es el dry-run.",
+  "ficha_de_partida": {
+    "default_region_size": 4656365,
+    "file_md5": "98c9af248a564d48c37ec0ac6fdc819c",
+    "file_size": 62876,
+    "page": "G00",
+    "file": "CMNDAT.BIN"
+  },
+  "cambio": {
+    "region": "inventory",
+    "region_offset": "0x46ECEA",
+    "slots": 130,
+    "stride": 5,
+    "slot": 0,
+    "item_id": 63,
+    "count_before": 22,
+    "count_after": 99,
+    "payload_byte_changed": "0x46ECEE",
+    "file_md5_after": "4895b10dac9e826ea2023d5b3d97617b",
+    "file_size_after": 62877
+  },
+  "comandos": {
+    "simular": "pkp save write --save <copia>/A-save --page G00 --slot 0 --count 99 --dry-run",
+    "escribir": "pkp save write --save <copia>/A-save --page G00 --slot 0 --count 99 --yes",
+    "deshacer": "pkp save undo <manifiesto que imprime el paso anterior> --yes",
+    "leer": "pkp save read --save <copia>/A-save --page G00"
+  },
+  "comprobaciones": [
+    "el dry-run no escribe: md5 de CMNDAT.BIN igual antes y despues, y el mtime no cambia",
+    "tras --yes, save read muestra 'hueco 0  id 63  cant 99'",
+    "tras undo --yes, el md5 vuelve al de partida byte a byte (medido: 98c9af248a564d48c37ec0ac6fdc819c)"
+  ]
+}

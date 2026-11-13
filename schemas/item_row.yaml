@@ -182,14 +182,18 @@ fields:
     length: 2
     type: u16
     name: key_26
-    role: clave de serie (creciente)
-    confidence: unknown
+    role: puntero a la fila cabeza de su familia (base 11238)
+    confidence: measured
     min: 0
     max: 15239
     evidence: >-
-      measure §3: 1601 valores distintos, 11244..15239 en las series visibles, 914 ceros.
-      Max 15239 sale de todo rango de tabla conocida -> no es indice.  Crece con el
-      orden de fila dentro de la serie: se comporta como desplazamiento o contador.
+      measure §3 (historico, t_08c3f16a): 1601 valores distintos, 11244..15239 en las series
+      visibles, 914 ceros.  Max 15239 sale de todo rango de tabla conocida -> no es indice.
+      t_a809f6ef (docs/SPEC-ITEM-ROW.md §15.1): +26 = 11238 + fila_cabeza.  La base se
+      determina sin parametro libre barriendo bases y contando destinos que se apuntan a si
+      mismos: base 11238 -> 1578 de 1600 destinos son punto fijo; las bases vecinas dan <= 15.
+      3686 filas con puntero, 0 fuera de rango, 1600 cabezas distintas, 991 familias de 2 o mas
+      filas.  El minimo observado (11244) cuadra con base 11238 y fila destino >= 6.
 
   - offset: 28
     length: 2

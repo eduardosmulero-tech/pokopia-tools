@@ -192,7 +192,12 @@ def test_expect_incorrecto_dice_que_esperaba_y_que_encontro(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Los tres ejemplos del repo, contra el dump real
+# Los ejemplos del repo, contra el dump real
+#
+# Todo lo que hay en `ejemplos/` con `mod.json` tiene que validar. Una carpeta sin
+# manifiesto no es un mod y se salta: `ejemplos/a7-cantidad-hueco0` es el vehiculo de
+# una unidad del SAVE (`vehiculo.json` + el comando), y el formato de mod no escribe en
+# el save (docs/MOD-FORMAT.md 5).
 # --------------------------------------------------------------------------
 
 @necesita_dump
@@ -201,6 +206,8 @@ def test_ejemplos_del_repo_validan(carpeta):
     ruta = os.path.join(EJEMPLOS, carpeta)
     if not os.path.isdir(ruta):
         pytest.skip("no es una carpeta de mod")
+    if not os.path.isfile(os.path.join(ruta, "mod.json")):
+        pytest.skip("no lleva mod.json: no es un mod declarativo")
     mod = load_mod(ruta)
     cont = paths.resolve_container(None)
     rep = validate(mod, cont)

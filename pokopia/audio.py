@@ -822,8 +822,8 @@ def ka1a_snr_db(original: list[int], decodificado: list[float]) -> float:
 # WAV (RIFF PCM 16 bits) y tonos
 # ---------------------------------------------------------------------------
 
-def read_wav(path: str) -> tuple[list[int], int, int]:
-    """Lee un WAV PCM de 16 bits y devuelve (muestras del canal 0, Hz, canales)."""
+def read_wav_channels(path: str) -> tuple[list[list[int]], int]:
+    """Lee un WAV PCM de 16 bits y devuelve (una lista de muestras por canal, Hz)."""
     try:
         with wave.open(path, "rb") as w:
             canales = w.getnchannels()
@@ -838,12 +838,16 @@ def read_wav(path: str) -> tuple[list[int], int, int]:
     if canales < 1:
         raise AudioError("%s: sin canales" % path)
     total = len(crudo) // 2
-    muestras = list(struct.unpack("<%dh" % total, crudo))
-    if canales > 1:
-        muestras = muestras[::canales]
-    if not muestras:
+    entrelazadas = list(struct.unpack("<%dh" % total, crudo))
+    if not entrelazadas:
         raise AudioError("%s: 0 muestras" % path)
-    return muestras, rate, canales
+    return [entrelazadas[c::canales] for c in range(canales)], rate
+
+
+def read_wav(path: str) -> tuple[list[int], int, int]:
+    """Lee un WAV PCM de 16 bits y devuelve (muestras del canal 0, Hz, canales)."""
+    canales, rate = read_wav_channels(path)
+    return canales[0], rate, len(canales)
 
 
 def write_wav(path: str, samples: list[int], rate: int, channels: int = 1) -> None:

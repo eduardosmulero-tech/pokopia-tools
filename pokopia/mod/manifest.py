@@ -4,7 +4,13 @@ El contrato es el de `docs/ARQUITECTURA-KIT.md` §4:
 
     mod_format, name, version, authors, game{title, version, container_md5},
     requires[], edits[{table,row,offset,type,expect,value,why}],
-    text[{table,id,slot,expect_sha256|expect,value,why}], files[{path,sha256}]
+    text[{table,id,slot,expect_sha256|expect,value,why}], files[{path,sha256}],
+    romfs[{path,file,why,size,sha256,original_sha256}]
+
+`romfs[]` es la seccion que hace instalable un mod: cada entrada dice que fichero
+del romfs sustituye (`path`), con que fichero del mod (`file`) y cual era el
+original (`original_sha256`, para poder demostrar que al desinstalar vuelve). Ver
+docs/MOD-OVERLAY.es.md §3 y docs/MOD-FORMAT.md §11.
 
 `expect` y `why` son obligatorios en toda edicion de bytes. En las ediciones de
 texto el `expect` es **o** `expect_sha256` **o** `expect` (texto en claro), nunca
@@ -122,10 +128,42 @@ class TextEdit:
 
 
 @dataclass
+class RomfsFile:
+    """Un fichero que el mod pone en el overlay: sustituye `path` del romfs.
+
+    `path` y `file` son rutas relativas con `/`. `size`/`sha256` los rellena
+    `pkp mod pack` (si vienen, se comprueban antes de instalar) y
+    `original_sha256` es el hash de lo que el `RomFS.img` sirve hoy en `path`:
+    sin el no se puede demostrar que al desinstalar vuelve el original.
+    """
+
+    path: str
+    file: str
+    why: str
+    size: int | None = None
+    sha256: str = ""
+    original_sha256: str | None = None
+
+    def where(self) -> str:
+        return "romfs[%s]" % self.path
+
+    def as_dict(self) -> dict:
+        out: dict[str, object] = {"path": self.path, "file": self.file, "why": self.why}
+        if self.size is not None:
+            out["size"] = self.size
+        if self.sha256:
+            out["sha256"] = self.sha256
+        if self.original_sha256:
+            out["original_sha256"] = self.original_sha256
+        return out
+
+
+@dataclass
 class Mod:
     path: str                      # carpeta del mod
     manifest: str                  # ruta del mod.json
     doc: dict
+    mod_format: int = 0            # version del formato declarada (0 = ausente/ilegible)
     name: str = ""
     version: str = ""
     authors: list[str] = field(default_factory=list)
@@ -137,6 +175,7 @@ class Mod:
     edits: list[Edit] = field(default_factory=list)
     texts: list[TextEdit] = field(default_factory=list)
     files: list[dict] = field(default_factory=list)
+    romfs: list[RomfsFile] = field(default_factory=list)
     report: Report = field(default_factory=Report)
 
     @property
@@ -213,12 +252,13 @@ def parse_mod(doc: dict, manifest: str) -> Mod:
     rep = mod.report
 
     known_keys = {"mod_format", "name", "version", "authors", "description", "game",
-                  "requires", "edits", "text", "files", "merged_from"}
+                  "requires", "edits", "text", "files", "romfs", "merged_from"}
     for key in doc:
         if key not in known_keys:
             rep.warning("schema.unknown_key", "clave desconocida ignorada: %r" % key)
 
     fmt = doc.get("mod_format")
+    mod.mod_format = fmt if isinstance(fmt, int) and not isinstance(fmt, bool) else 0
     if fmt is None:
         rep.error("schema.mod_format", "falta 'mod_format' (debe ser %d)" % MOD_FORMAT)
     elif fmt != MOD_FORMAT:
@@ -250,8 +290,9 @@ def parse_mod(doc: dict, manifest: str) -> Mod:
     _parse_edits(mod, doc, rep)
     _parse_texts(mod, doc, rep)
     _parse_files(mod, doc, rep)
+    _parse_romfs(mod, doc, rep)
 
-    if not mod.edits and not mod.texts:
+    if not mod.edits and not mod.texts and not mod.romfs:
         rep.warning("mod.empty", "el mod no declara ninguna edicion: no hace nada")
     return mod
 
@@ -490,6 +531,87 @@ def _parse_files(mod: Mod, doc: dict, rep: Report) -> None:
             rep.error("schema.files", "files[%d] debe ser un objeto con 'path'" % i)
             continue
         mod.files.append(raw)
+
+
+#: Ruta relativa dentro del romfs: sin raiz, sin unidad, sin `..`, con `/`.
+ROMFS_PATH_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/ -]*$")
+
+
+def romfs_path_problem(text: object) -> str | None:
+    """Motivo por el que `text` no vale como ruta interna del romfs (o `None`).
+
+    Una ruta del manifiesto acaba siendo un `os.path.join` en el overlay: si
+    admite `..`, `C:` o una raiz absoluta, el mod puede escribir fuera de su
+    carpeta. Se rechaza aqui, una vez, en vez de en cada llamador.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return "no puede estar vacia"
+    if "\\" in text:
+        return "usa '/' como separador, no '\\': %r" % text
+    if text.startswith("/"):
+        return "no puede empezar por '/': %r" % text
+    if ":" in text:
+        return "no puede llevar unidad ni ':' (el runtime trocea el overlay por ':'): %r" % text
+    if ".." in text.split("/"):
+        return "no puede llevar '..': %r" % text
+    if any(part in ("", ".") for part in text.split("/")):
+        return "tiene un tramo vacio o '.': %r" % text
+    if not ROMFS_PATH_RE.match(text):
+        return "solo admite letras, digitos, '.', '_', '-', ' ' y '/': %r" % text
+    return None
+
+
+def _parse_romfs(mod: Mod, doc: dict, rep: Report) -> None:
+    romfs = doc.get("romfs", [])
+    if not isinstance(romfs, list):
+        rep.error("schema.romfs", "'romfs' debe ser una lista")
+        return
+    vistos: dict[str, int] = {}
+    for i, raw in enumerate(romfs):
+        where = "romfs[%d]" % i
+        if not isinstance(raw, dict):
+            rep.error("schema.romfs", "debe ser un objeto", where)
+            continue
+        path = raw.get("path")
+        malo = romfs_path_problem(path)
+        if malo is not None or not isinstance(path, str):
+            rep.error("schema.romfs.path", "romfs[%d].path %s" % (i, malo), where)
+            continue
+        if path in vistos:
+            rep.error("schema.romfs.path",
+                      "romfs[%d] y romfs[%d] sustituyen la misma ruta %r: declara una sola"
+                      % (vistos[path], i, path), where)
+            continue
+        vistos[path] = i
+        file = raw.get("file")
+        malo = romfs_path_problem(file)
+        if malo is not None or not isinstance(file, str):
+            rep.error("schema.romfs.file", "romfs[%d].file %s" % (i, malo), where)
+            continue
+        why = _str_field(raw, "why", rep)
+        if not why.strip():
+            rep.error("schema.why", "'why' es obligatorio y no puede estar vacio "
+                                    "(que fichero del romfs sustituyes)", where)
+        size = raw.get("size")
+        if size is not None and (isinstance(size, bool) or not isinstance(size, int) or size < 0):
+            rep.error("schema.romfs.size", "'size' debe ser entero >= 0, es %r" % (size,),
+                      where)
+            size = None
+        sha = raw.get("sha256", "")
+        if sha and (not isinstance(sha, str) or not SHA256_RE.match(sha)):
+            rep.error("schema.romfs.sha256",
+                      "'sha256' debe ser sha256 hexadecimal en minusculas de 64 caracteres",
+                      where)
+            sha = ""
+        original = raw.get("original_sha256")
+        if original is not None and (not isinstance(original, str)
+                                     or not SHA256_RE.match(original)):
+            rep.error("schema.romfs.original_sha256",
+                      "'original_sha256' debe ser sha256 hexadecimal en minusculas de 64 "
+                      "caracteres (lo calcula `pkp mod pack --img`)", where)
+            original = None
+        mod.romfs.append(RomfsFile(path=path, file=file, why=why, size=size,
+                                   sha256=sha or "", original_sha256=original))
 
 
 # --------------------------------------------------------------------------

@@ -248,3 +248,161 @@ def test_el_arbol_publicable_no_tiene_avisos(capsys):
     salida = capsys.readouterr().out
     assert codigo == 0, salida
     assert "AVISO" not in salida, salida
+
+
+# ---------------------------------------------------------------------------
+# La excepcion de D-020: `patches/` acepta parches de codigo, pero solo en el
+# formato verificado. Un guard que acepta cualquier cosa bajo `patches/` es
+# peor que no tener carpeta: da permiso con apariencia de control.
+# ---------------------------------------------------------------------------
+
+BUILD = "0123456789abcdef0123456789abcdef01234567"
+SHA256 = "0" * 64
+OFFSET = 41194896          # 0x02749590
+
+
+def _parche(tmp_path, manifiesto=None, pchtxt=None):
+    """Arbol minimo con un parche; `manifiesto(doc)` puede romperlo a proposito."""
+    (tmp_path / "patches").mkdir()
+    (tmp_path / "patches" / "README.md").write_text("# Patches\n\nreglas\n", encoding="utf-8")
+    carpeta = tmp_path / "patches" / "demo"
+    carpeta.mkdir()
+    doc = {
+        "patch_format": 1,
+        "name": "demo",
+        "status": "in-testing",
+        "target": {"file": "main", "version": "2.0.1a",
+                   "build_id": BUILD, "sha256": SHA256},
+        "edits": [{"offset": OFFSET, "expect": "00", "value": "aa", "why": "sondeo"}],
+        "revert": "delete the folder from the loader patch directory",
+    }
+    if manifiesto is not None:
+        doc = manifiesto(doc)
+    (carpeta / "patch.json").write_text(json.dumps(doc), encoding="utf-8")
+    if pchtxt is None:
+        pchtxt = "# sondeo\n@nsobid-%s\n0x%08x aa\n" % (BUILD, OFFSET)
+    (carpeta / "patch.pchtxt").write_text(pchtxt, encoding="utf-8")
+    return carpeta
+
+
+def test_parche_valido_pasa(tmp_path, capsys):
+    _parche(tmp_path)
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 0, salida
+    assert salida.startswith("OK - 3 ficheros"), salida
+
+
+def test_ips_suelto_se_rechaza(tmp_path, capsys):
+    """Lo de antes sigue siendo un fallo: un `.ips` no se cuela por la excepcion."""
+    (tmp_path / "parche.ips").write_bytes(b"PATCH\x00\x01\xaaEOF")
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 1, salida
+    assert "sufijo prohibido (.ips)" in salida, salida
+
+
+def test_ips_dentro_de_patches_tambien_se_rechaza(tmp_path, capsys):
+    """Dentro de `patches/` no hay excepcion para binarios opacos."""
+    carpeta = _parche(tmp_path)
+    (carpeta / "patch.ips").write_bytes(b"PATCH\x00\x01\xaaEOF")
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 1, salida
+    assert "sufijo prohibido (.ips)" in salida, salida
+
+
+def test_pchtxt_fuera_de_patches_se_rechaza(tmp_path, capsys):
+    _parche(tmp_path)
+    (tmp_path / "suelto.pchtxt").write_text("@nsobid-%s\n0x10 aa\n" % BUILD, encoding="utf-8")
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 1, salida
+    assert "parche de texto fuera de patches/" in salida, salida
+
+
+def test_parche_sin_sha256_se_rechaza(tmp_path, capsys):
+    def romper(doc):
+        del doc["target"]["sha256"]
+        return doc
+    _parche(tmp_path, manifiesto=romper)
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 1, salida
+    assert "falta target.sha256" in salida, salida
+
+
+def test_parche_sin_reversion_se_rechaza(tmp_path, capsys):
+    def romper(doc):
+        del doc["revert"]
+        return doc
+    _parche(tmp_path, manifiesto=romper)
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 1, salida
+    assert "falta 'revert'" in salida, salida
+
+
+def test_parche_con_mas_de_4_kb_se_rechaza(tmp_path, capsys):
+    def romper(doc):
+        doc["edits"][0]["expect"] = "00" * 5000
+        doc["edits"][0]["value"] = "aa" * 5000
+        return doc
+    _parche(tmp_path, manifiesto=romper)
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 1, salida
+    assert "bytes declarados (expect + value)" in salida, salida
+
+
+def test_pchtxt_que_no_coincide_con_el_manifiesto(tmp_path, capsys):
+    _parche(tmp_path, pchtxt="@nsobid-%s\n0x%08x bb\n" % (BUILD, OFFSET))
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 1, salida
+    assert "no coincide con 'edits'" in salida, salida
+
+
+def test_build_id_distinto_entre_manifiesto_y_pchtxt(tmp_path, capsys):
+    _parche(tmp_path, pchtxt="@nsobid-%s\n0x%08x aa\n" % ("f" * 40, OFFSET))
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 1, salida
+    assert "no es el build_id del manifiesto" in salida, salida
+
+
+def test_parche_sin_manifiesto_se_rechaza(tmp_path, capsys):
+    carpeta = _parche(tmp_path)
+    (carpeta / "patch.json").unlink()
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 1, salida
+    assert "sin patch.json" in salida, salida
+
+
+def test_fichero_no_declarado_en_patches(tmp_path, capsys):
+    carpeta = _parche(tmp_path)
+    (carpeta / "notas.txt").write_text("nada\n", encoding="utf-8")
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 1, salida
+    assert "fichero no permitido en un parche" in salida, salida
+
+
+def test_patches_sin_readme_se_rechaza(tmp_path, capsys):
+    _parche(tmp_path)
+    (tmp_path / "patches" / "README.md").unlink()
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 1, salida
+    assert "sin README.md" in salida, salida
+
+
+def test_pchtxt_con_texto_se_rechaza(tmp_path, capsys):
+    _parche(tmp_path, pchtxt='@nsobid-%s\n0x%08x "TEXTO"\n' % (BUILD, OFFSET))
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 1, salida
+    assert "escritura de cadena" in salida, salida
+
+
+def test_pchtxt_con_directiva_no_permitida(tmp_path, capsys):
+    _parche(tmp_path, pchtxt="@nsobid-%s\n@flag offset_shift 0x10\n0x%08x aa\n" % (BUILD, OFFSET))
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 1, salida
+    assert "directiva no permitida" in salida, salida
+
+
+def test_patch_json_ilegible_se_rechaza(tmp_path, capsys):
+    carpeta = _parche(tmp_path)
+    (carpeta / "patch.json").write_text("{ esto no es json", encoding="utf-8")
+    codigo, salida = ejecutar(capsys, tmp_path)
+    assert codigo == 1, salida
+    assert "no es JSON legible" in salida, salida

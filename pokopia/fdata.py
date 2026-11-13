@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lector de los contenedores `.fdata` del romfs (PDRK/IDRK). Solo lectura.
+"""Lector y escritor minimo de los contenedores `.fdata` del romfs (PDRK/IDRK).
 
 Los `.fdata` son 24 ficheros del romfs (5,06 GB en el build 655360) que hasta
 ahora eran caja negra: dentro van las escenas, las texturas, los sonidos y las
@@ -34,12 +34,16 @@ sin codigo copiado): `eArmada8/yumia_fdata_tools` -> `yumia_mod_lib.py`
 (`read_fdata_file`, `read_fdata_for_idrk_information`), `bnnm/vgm-tools`
 (`koei_rdb_fdata_file.bms`) y `DeathChaos25/fdata_dump`.
 
-Solo stdlib. Nada de este modulo escribe: la escritura de entradas (reemplazo)
-es otra tarjeta y otro contrato.
+Solo stdlib. **Leer es lo de por defecto**: ninguna funcion de lectura escribe.
+La escritura vive al final del modulo (`write_entry`, `repack`, `inject`) y solo
+corre si se pide; `repack` pasa por `paths.guard_writable()`, asi que el dump del
+juego sigue siendo de solo lectura por construccion. Forma de escritura, limites
+y medidas en `docs/ESCRITURA-FDATA.md`.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import struct
 import zlib
@@ -472,7 +476,356 @@ def extract(reader_path: str, wanted: int, out_dir: str) -> list[tuple[Entry, st
     return escritos
 
 
+# ---------------------------------------------------------------------------
+# Escritura (contrato nuevo: se pide a mano, nunca por defecto)
+# ---------------------------------------------------------------------------
+
+#: Tamano descomprimido de cada trozo en la forma comprimida. Medido en la
+#: entrada de 350.772 B del dump: 22 trozos, 21 de 16.384 B y el ultimo de 6.708.
+CHUNK_SIZE = 0x4000
+
+#: Nivel de zlib de los `.fdata` del juego. Medido: recomprimir el payload
+#: original en trozos de 16.384 B a nivel 6 reproduce los 22 trozos byte a byte
+#: (2.160 B frente a 2.162 del original, los 2 B de cola son relleno); nivel 9
+#: acierta 0 de 22. Ojo: `LD_C0_R.BIN` usa nivel 9, no es la misma convencion.
+CHUNK_ZLIB_LEVEL = 6
+
+
+class FdataWriteError(FdataError):
+    """No se puede escribir esa entrada, esa ruta o ese contenedor."""
+
+
+@dataclass(frozen=True)
+class RepackResult:
+    """Lo que ha quedado en disco al reescribir un `.fdata`."""
+
+    origen: str
+    destino: str
+    entries: int
+    size: int
+    sha256: str
+    replaced: tuple[int, ...]
+
+    def as_dict(self) -> dict:
+        return {
+            "source": os.path.abspath(self.origen),
+            "out": os.path.abspath(self.destino),
+            "entries": self.entries,
+            "size": self.size,
+            "sha256": self.sha256,
+            "replaced": ["0x%08x" % h for h in self.replaced],
+        }
+
+
+@dataclass(frozen=True)
+class InjectResult:
+    """Resultado de `inject`: la entrada de antes, la de despues y el fichero."""
+
+    origen: str
+    destino: str
+    route: str
+    before: Entry
+    entry_size: int
+    compressed_size: int
+    uncompressed_size: int
+    metadata_size: int
+    flags: int
+    repack: RepackResult
+
+    def as_dict(self) -> dict:
+        return {
+            "route": self.route,
+            "source": os.path.abspath(self.origen),
+            "out": os.path.abspath(self.destino),
+            "name_hash": "0x%08x" % self.before.name_hash,
+            "type": self.before.type_name,
+            "entry_type": self.before.entry_type,
+            "before": self.before.as_dict(),
+            "after": {
+                "offset": self.before.offset,
+                "entry_size": self.entry_size,
+                "compressed_size": self.compressed_size,
+                "uncompressed_size": self.uncompressed_size,
+                "metadata_size": self.metadata_size,
+                "flags": self.flags,
+            },
+            "size_before": os.path.getsize(self.origen),
+            "size_after": self.repack.size,
+            "sha256": self.repack.sha256,
+        }
+
+
+def entry_metadata(path: str, entry: Entry) -> bytes:
+    """Los bytes opacos entre la cabecera y los datos (`metadata_size`)."""
+    if entry.metadata_size == 0:
+        return b""
+    with open(path, "rb", buffering=0) as fh:
+        fh.seek(entry.offset + ENTRY_HEADER_SIZE)
+        datos = fh.read(entry.metadata_size)
+    if len(datos) != entry.metadata_size:
+        raise FdataTruncatedError(
+            "entrada 0x%08x en 0x%x: se esperaban %d B de metadatos y hay %d"
+            % (entry.name_hash, entry.offset, entry.metadata_size, len(datos)))
+    return datos
+
+
+def write_entry(payload: bytes, *, metadata: bytes = b"", entry_type: int = 0,
+                name_hash: int = 0, type_ktid: int = 0, flags: int = 0,
+                stored: bytes | None = None) -> bytes:
+    """Bytes de **una** entrada IDRK completa: cabecera + metadatos + datos.
+
+    No escribe en disco: devuelve el bloque para que lo coloque `repack()`.
+
+    Dos formas, las dos que el contenedor acepta (forma medida en
+    `docs/ESCRITURA-FDATA.md`):
+
+    * **cruda** (`stored=None`): los datos van tal cual y los dos tamanos
+      declaran lo mismo (`compressed_size == uncompressed_size`). Es la forma
+      que usan las 123 entradas crudas del dump y la que escribe la herramienta
+      publica `eArmada8/yumia_fdata_tools` (GPL-3.0, citada, no copiada).
+    * **comprimida-preservada** (`stored=<bytes ya comprimidos>`): se guardan
+      esos bytes tal cual, sin re-trocear ni recomprimir, declarando
+      `uncompressed_size = len(payload)`. Sirve para reescribir una entrada con
+      su payload original comprimido.
+    """
+    payload = bytes(payload)
+    metadata = bytes(metadata)
+    if not payload:
+        raise FdataWriteError("payload vacio: una entrada sin datos no es valida")
+    if stored is None:
+        datos = payload
+        comprimido = len(payload)
+    else:
+        datos = bytes(stored)
+        comprimido = len(datos)
+        if not datos:
+            raise FdataWriteError("payload comprimido vacio")
+        if comprimido == len(payload):
+            raise FdataWriteError(
+                "los bytes comprimidos miden lo mismo que los crudos (%d B): el "
+                "lector los tomaria por una entrada cruda y devolveria basura; "
+                "usa la forma cruda sin `stored`" % comprimido)
+    entry_size = ENTRY_HEADER_SIZE + len(metadata) + len(datos)
+    for nombre, valor in (("entry_type", entry_type), ("name_hash", name_hash),
+                          ("type_ktid", type_ktid), ("flags", flags)):
+        if not 0 <= valor <= 0xFFFFFFFF:
+            raise FdataWriteError("%s fuera de u32: %r" % (nombre, valor))
+    return (IDRK_MAGIC
+            + struct.pack("<3Q", entry_size, comprimido, len(payload))
+            + struct.pack("<4I", entry_type, name_hash, type_ktid, flags)
+            + metadata
+            + datos)
+
+
+def chunked_size(payload: bytes, *, level: int = CHUNK_ZLIB_LEVEL,
+                 chunk: int = CHUNK_SIZE, header_size: int = 10) -> int:
+    """Cuanto ocuparia `payload` en la forma comprimida del juego.
+
+    Sirve para presupuesto (¿cabe en el hueco?), no para escribir: la cabecera
+    de trozo tiene 8 B cuyo contenido **no** esta resuelto (`docs/ESCRITURA-FDATA.md`).
+    """
+    if chunk <= 0:
+        raise FdataWriteError("trozo de %d B" % chunk)
+    total = 0
+    for inicio in range(0, len(payload), chunk):
+        total += header_size + len(zlib.compress(payload[inicio:inicio + chunk], level))
+    return total
+
+
+def find_entry(path: str, name_hash: int) -> Entry:
+    """La entrada con ese `name_hash`, exigiendo que sea unica."""
+    halladas = [e for e in iter_entries(path) if e.name_hash == name_hash]
+    if not halladas:
+        raise FdataWriteError(
+            "0x%08x no esta en %s (%d entradas)"
+            % (name_hash, path, sum(1 for _ in iter_entries(path))))
+    if len(halladas) > 1:
+        raise FdataWriteError(
+            "0x%08x aparece %d veces en %s: no se puede elegir por hash"
+            % (name_hash, len(halladas), path))
+    return halladas[0]
+
+
+def _validar_reemplazo(name_hash: int, blob: bytes, origen: str) -> None:
+    """El bloque tiene que ser una entrada IDRK entera y con el mismo hash."""
+    if len(blob) < ENTRY_HEADER_SIZE:
+        raise FdataWriteError(
+            "0x%08x: el bloque tiene %d B y la cabecera sola son 0x30"
+            % (name_hash, len(blob)))
+    (magic, entry_size, _cmp, _unc,
+     _tipo, hash_bloque, _ktid, _flags) = ENTRY_HEADER.unpack_from(blob)
+    if magic != IDRK_MAGIC:
+        raise FdataWriteError("0x%08x: el bloque no empieza por IDRK0000" % name_hash)
+    if entry_size != len(blob):
+        raise FdataWriteError(
+            "0x%08x: la cabecera declara entry_size %d y el bloque mide %d"
+            % (name_hash, entry_size, len(blob)))
+    if hash_bloque != name_hash:
+        raise FdataWriteError(
+            "0x%08x: el bloque trae name_hash 0x%08x" % (name_hash, hash_bloque))
+
+
+def repack(origen: str, destino: str,
+           reemplazos: dict[int, bytes] | None = None) -> RepackResult:
+    """Reescribe `origen` en `destino` con las entradas de `reemplazos` cambiadas.
+
+    Las entradas que no estan en `reemplazos` se copian **byte a byte** desde el
+    origen, relleno de alineacion incluido; las cambiadas se escriben tal cual
+    vienen y se rellena con ceros hasta el siguiente multiplo de 16. Cabecera
+    `PDRK0000` + `<u32 header_size, u32 0>` (el tercer campo del dump es 0;
+    `yumia_fdata_tools` escribe ahi el tamano del fichero — convencion suya, no
+    se copia).
+
+    Sin reemplazos, el destino sale identico al origen byte a byte (es el
+    criterio de aceptacion C1 de la tarjeta que pidio este escritor).
+
+    Escribe en `<destino>.tmp` y lo renombra al final: si el proceso se corta,
+    no queda un `.fdata` a medias y el origen nunca se toca. Se niega a escribir
+    dentro del romfs (`paths.guard_writable`) y a escribir sobre el origen.
+    """
+    from . import paths as pkp_paths  # local: evita ciclo al importar el paquete
+
+    cambios = dict(reemplazos or {})
+    if pkp_paths.norm(origen) == pkp_paths.norm(destino):
+        raise FdataWriteError(
+            "origen y destino son el mismo fichero: %s\n"
+            "  escribe una copia nueva con --out" % origen)
+    pkp_paths.guard_writable(destino)
+
+    total = os.path.getsize(origen)
+    entradas = list(iter_entries(origen))
+    if not entradas:
+        raise FdataWriteError("%s no tiene ninguna entrada" % origen)
+    with open(origen, "rb") as fh:
+        cabecera = fh.read(FDATA_HEADER_SIZE)
+        header_size = struct.unpack_from("<I", cabecera, 8)[0]
+        extra = b""
+        if header_size > FDATA_HEADER_SIZE:
+            fh.seek(FDATA_HEADER_SIZE)
+            extra = fh.read(header_size - FDATA_HEADER_SIZE)
+            if len(extra) != header_size - FDATA_HEADER_SIZE:
+                raise FdataTruncatedError(
+                    "%s: la cabecera declara %d B y no llega" % (origen, header_size))
+
+    por_hash = {e.name_hash: e for e in entradas}
+    for name_hash, blob in cambios.items():
+        if name_hash not in por_hash:
+            raise FdataWriteError(
+                "0x%08x no esta en %s: no hay nada que reemplazar" % (name_hash, origen))
+        _validar_reemplazo(name_hash, blob, origen)
+
+    ultima = entradas[-1]
+    fin_declarado = ultima.offset + ultima.entry_size
+    if fin_declarado > total:
+        raise FdataTruncatedError(
+            "%s: la ultima entrada acaba en %d y el fichero mide %d"
+            % (origen, fin_declarado, total))
+
+    tmp = destino + ".tmp"
+    escrito = 0
+    digest = hashlib.sha256()
+    try:
+        with open(origen, "rb", buffering=0) as src, open(tmp, "wb") as dst:
+
+            def emitir(blob: bytes) -> None:
+                nonlocal escrito
+                dst.write(blob)
+                digest.update(blob)
+                escrito += len(blob)
+
+            emitir(PDRK_MAGIC + struct.pack("<2I", header_size, 0) + extra)
+            for i, entry in enumerate(entradas):
+                es_ultima = i == len(entradas) - 1
+                reemplazo = cambios.get(entry.name_hash)
+                if reemplazo is not None:
+                    emitir(reemplazo)
+                    if not es_ultima and len(reemplazo) % ENTRY_ALIGN:
+                        emitir(b"\x00" * (ENTRY_ALIGN - len(reemplazo) % ENTRY_ALIGN))
+                    continue
+                # Tramo del origen tal cual: entrada + su relleno. La ultima no
+                # lleva relleno porque el fichero acaba en su entry_size (medido:
+                # 84.073.115 B, no 84.073.120).
+                fin = fin_declarado if es_ultima else entry.end_offset
+                src.seek(entry.offset)
+                datos = src.read(fin - entry.offset)
+                if len(datos) != fin - entry.offset:
+                    raise FdataTruncatedError(
+                        "%s: entrada 0x%08x en 0x%x cortada (%d de %d B)"
+                        % (origen, entry.name_hash, entry.offset,
+                           len(datos), fin - entry.offset))
+                emitir(datos)
+            cola = total - fin_declarado
+            if cola > 0:
+                src.seek(fin_declarado)
+                emitir(src.read(cola))
+        os.replace(tmp, destino)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+    return RepackResult(origen, destino, len(entradas), escrito,
+                        digest.hexdigest(), tuple(sorted(cambios)))
+
+
+def inject(origen: str, destino: str, name_hash: int, payload: bytes, *,
+           route: str = "raw", flags: int | None = None) -> InjectResult:
+    """Mete `payload` en la entrada `name_hash` y escribe `destino`.
+
+    `route="raw"` (la recomendada y la unica implementada): entrada cruda, con
+    `compressed_size == uncompressed_size == len(payload)`, los metadatos y los
+    campos `entry_type`/`name_hash`/`type_ktid` copiados del original y los
+    `flags` tambien: en el dump **las 123 entradas crudas llevan 0x400000**, los
+    mismos que las comprimidas, asi que conservarlos es lo medido (se puede
+    forzar otro valor con `flags=`).
+
+    `route="slot"`: parche en sitio sin desplazar nada. **No implementada**: solo
+    comprueba el presupuesto y explica el motivo medido (los 8 B de la cabecera
+    del trozo siguen sin resolver).
+    """
+    if route not in ("raw", "slot"):
+        raise FdataWriteError("ruta desconocida: %r (raw|slot)" % (route,))
+    payload = bytes(payload)
+    entry = find_entry(origen, name_hash)
+    if route == "slot":
+        ocuparia = chunked_size(payload)
+        if ocuparia > entry.compressed_size:
+            raise FdataWriteError(
+                "no cabe en la ranura: el payload nuevo ocuparia %d B "
+                "comprimido (nivel %d, trozos de %d B) y el hueco de 0x%08x "
+                "son %d B; faltan %d B"
+                % (ocuparia, CHUNK_ZLIB_LEVEL, CHUNK_SIZE, name_hash,
+                   entry.compressed_size, ocuparia - entry.compressed_size))
+        raise FdataWriteError(
+            "ruta slot no implementada: cabe (%d de %d B) pero cada trozo "
+            "lleva 8 B en su cabecera que no son ninguna de las funciones "
+            "probadas (crc32, crc32c, adler32, md5, sha1, sha256, blake2b, "
+            "xxh64) ni funcion de solo el contenido del trozo (medido: dos "
+            "trozos distintos comparten los mismos 8 B). Escribirlos a cero es "
+            "una apuesta, no una medida: usa --route raw. Ver "
+            "docs/ESCRITURA-FDATA.md"
+            % (ocuparia, entry.compressed_size))
+
+    blob = write_entry(payload,
+                       metadata=entry_metadata(origen, entry),
+                       entry_type=entry.entry_type,
+                       name_hash=entry.name_hash,
+                       type_ktid=entry.type_ktid,
+                       flags=entry.flags if flags is None else flags)
+    resultado = repack(origen, destino, {name_hash: blob})
+    return InjectResult(
+        origen, destino, route, entry,
+        entry_size=len(blob),
+        compressed_size=len(blob) - ENTRY_HEADER_SIZE - entry.metadata_size,
+        uncompressed_size=len(payload),
+        metadata_size=entry.metadata_size,
+        flags=entry.flags if flags is None else flags,
+        repack=resultado)
+
+
 __all__ = [
+    "CHUNK_SIZE",
+    "CHUNK_ZLIB_LEVEL",
     "ENTRY_ALIGN",
     "ENTRY_HEADER",
     "ENTRY_HEADER_SIZE",
@@ -486,16 +839,25 @@ __all__ = [
     "FdataError",
     "FdataFormatError",
     "FdataTruncatedError",
+    "FdataWriteError",
     "FileCount",
+    "InjectResult",
+    "RepackResult",
     "ScanResult",
     "TypeCount",
     "align_up",
+    "chunked_size",
+    "entry_metadata",
     "extract",
+    "find_entry",
     "find_fdata",
+    "inject",
     "iter_entries",
     "parse_type",
     "read_entry",
     "read_entry_from",
+    "repack",
     "scan",
     "type_name",
+    "write_entry",
 ]

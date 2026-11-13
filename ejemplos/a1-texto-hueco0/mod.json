@@ -1,0 +1,58 @@
+{
+  "mod_format": 1,
+  "name": "a1-texto-hueco0",
+  "version": "0.1.0",
+  "authors": [
+    "worker (tarjeta t_5264ef63)"
+  ],
+  "description": "Vehiculo de la prueba A1 de docs/PRUEBAS-DE-EDU.md: escribe un marcador en el texto que pinta el objeto del hueco 0 del inventario. Identifica el bloque por sha256, sin contenido del juego en el manifiesto.",
+  "game": {
+    "title": "pokopia",
+    "version": "2.0.1a",
+    "container_md5": {
+      "LD_C0_R.BIN": "358a672d506ce2b0399149ede64a6760",
+      "LI_C0_R.IDX": "7e056a097f28a62f002ad961a611edf8"
+    }
+  },
+  "requires": [],
+  "edits": [],
+  "text": [
+    {
+      "table": 4650,
+      "id": 2284,
+      "slot": 0,
+      "expect_sha256": "e300dd4bbc5c2c12b6846e9b5ab1f35caa3e07ba18ea28a6d4b21a2e6980cb29",
+      "value": "MOD-PRUEBA",
+      "why": "slot 0 (singular) del bloque 6*(id-4) = 13680..13685. Cadena medida: save hueco 0 -> id 63 -> #983 fila 63 -> +34 = 2281 -> id de texto 2281+3 = 2284. El expect_sha256 identifica el bloque de 46 B de este build sin escribir su contenido (docs/MOD-FORMAT.md 3.1).",
+      "confidence": "verified"
+    },
+    {
+      "table": 4650,
+      "id": 2284,
+      "slot": 2,
+      "expect_sha256": "e300dd4bbc5c2c12b6846e9b5ab1f35caa3e07ba18ea28a6d4b21a2e6980cb29",
+      "value": "MOD-PRUEBA",
+      "why": "slot 2 (plural) del MISMO bloque; lleva el mismo digest del bloque pristino, no el que deja la edicion del slot 0 (docs/MOD-FORMAT.md 3.1).",
+      "confidence": "verified"
+    },
+    {
+      "table": 4650,
+      "id": 2284,
+      "slot": 3,
+      "expect_sha256": "e300dd4bbc5c2c12b6846e9b5ab1f35caa3e07ba18ea28a6d4b21a2e6980cb29",
+      "value": "MOD-PRUEBA",
+      "why": "slot 3: segundo grupo del bloque. La mascara de slots con contenido es 0x2D (+0,+2,+3,+5; +1 y +4 vacios) y en frio no se sabe cual de los dos grupos pinta el juego: se escriben los cuatro para que el texto salga se pinte el que se pinte (medido en B3, docs/SPEC-NAMES.md 6.1).",
+      "confidence": "verified"
+    },
+    {
+      "table": 4650,
+      "id": 2284,
+      "slot": 5,
+      "expect_sha256": "e300dd4bbc5c2c12b6846e9b5ab1f35caa3e07ba18ea28a6d4b21a2e6980cb29",
+      "value": "MOD-PRUEBA",
+      "why": "slot 5: pareja del +3 en el segundo grupo (mascara 0x2D). Los slots +1 y +4 estan vacios por diseno y no se tocan.",
+      "confidence": "verified"
+    }
+  ],
+  "files": []
+}

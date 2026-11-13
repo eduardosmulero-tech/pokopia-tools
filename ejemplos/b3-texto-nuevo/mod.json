@@ -1,0 +1,58 @@
+{
+  "mod_format": 1,
+  "name": "b3-texto-nuevo",
+  "version": "0.1.0",
+  "authors": [
+    "worker (tarjeta t_a0104ec9)"
+  ],
+  "description": "Vehiculo de la prueba B3 de docs/PRUEBAS-DE-EDU.md: escribe un texto propio en un bloque POBLADO y alcanzable de la tabla de nombres es, el del objeto del hueco 0 del inventario. Escribe los cuatro slots con contenido del bloque, no dos, para que el texto salga se pinte el grupo que se pinte. Identifica el bloque por sha256: el manifiesto no lleva contenido del juego.",
+  "game": {
+    "title": "pokopia",
+    "version": "2.0.1a",
+    "container_md5": {
+      "LD_C0_R.BIN": "358a672d506ce2b0399149ede64a6760",
+      "LI_C0_R.IDX": "7e056a097f28a62f002ad961a611edf8"
+    }
+  },
+  "requires": [],
+  "edits": [],
+  "text": [
+    {
+      "table": 4650,
+      "id": 2284,
+      "slot": 0,
+      "expect_sha256": "e300dd4bbc5c2c12b6846e9b5ab1f35caa3e07ba18ea28a6d4b21a2e6980cb29",
+      "value": "MOD-TEXT-NUEVO",
+      "why": "slot +0 (singular) del bloque 6*(id-4) = 13680..13685, poblado con la mascara 0x2D de #4650. Cadena medida: save G00 hueco 0 -> id 63 -> #983 fila 63 -> +34 u16 = 2281 -> id de texto 2284. expect_sha256 identifica el bloque de 46 B de este build sin escribir su contenido (docs/MOD-FORMAT.md 3.1).",
+      "confidence": "verified"
+    },
+    {
+      "table": 4650,
+      "id": 2284,
+      "slot": 2,
+      "expect_sha256": "e300dd4bbc5c2c12b6846e9b5ab1f35caa3e07ba18ea28a6d4b21a2e6980cb29",
+      "value": "MOD-TEXT-NUEVO",
+      "why": "slot +2 (plural) del MISMO bloque; lleva el digest del bloque pristino, no el que deja la edicion del slot 0 (docs/MOD-FORMAT.md 3.1).",
+      "confidence": "verified"
+    },
+    {
+      "table": 4650,
+      "id": 2284,
+      "slot": 3,
+      "expect_sha256": "e300dd4bbc5c2c12b6846e9b5ab1f35caa3e07ba18ea28a6d4b21a2e6980cb29",
+      "value": "MOD-TEXT-NUEVO",
+      "why": "slot +3: segundo grupo del bloque (la mascara 0x2D repite el singular de +0 en +3; medido: mismo sha256 de slot). Se escribe porque en frio no se puede saber cual de los dos grupos pinta el juego (docs/SPEC-NAMES.md 6.1): asi el texto sale en los dos casos.",
+      "confidence": "verified"
+    },
+    {
+      "table": 4650,
+      "id": 2284,
+      "slot": 5,
+      "expect_sha256": "e300dd4bbc5c2c12b6846e9b5ab1f35caa3e07ba18ea28a6d4b21a2e6980cb29",
+      "value": "MOD-TEXT-NUEVO",
+      "why": "slot +5: pareja del +3 en el segundo grupo (mascara 0x2D). Los slots +1 y +4 estan vacios por diseno en #4650 (mascara 0x2D) y NO se tocan.",
+      "confidence": "verified"
+    }
+  ],
+  "files": []
+}

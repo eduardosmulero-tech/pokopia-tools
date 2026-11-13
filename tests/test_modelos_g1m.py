@@ -3,10 +3,8 @@
 
 Los ficheros de prueba se construyen **aqui**, byte a byte, con modelos
 sinteticos de 4 vertices y 6 indices. No se usa ni un byte del juego: lo que se
-prueba es el lector (`pokopia/g1m.py`) y, cuando el arbol de trabajo lo trae, el
-comparador (`tools/modelos/pkp_modelo.py`), no el dump. `tools/` no viaja en la
-release, asi que las pruebas del comparador y de las herramientas se **saltan**
-ahi en vez de fallar.
+prueba es el lector (`tools/modelos/g1m.py`) y el comparador
+(`tools/modelos/pkp_modelo.py`), no el dump.
 
 Cubre lo que la tarjeta exige poder afirmar:
 
@@ -28,20 +26,18 @@ import sys
 
 import pytest
 
-from pokopia import g1m
-
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELOS = os.path.join(RAIZ, "tools", "modelos")
+if not os.path.isfile(os.path.join(MODELOS, "g1m.py")):
+    pytest.skip(
+        "tools/ no viaja en la release: el lector de modelos no esta en este arbol",
+        allow_module_level=True,
+    )
+if MODELOS not in sys.path:
+    sys.path.insert(0, MODELOS)
 
-#: El comparador vive en `tools/` (no viaja en la release): se importa si esta.
-pkp_modelo = None
-if os.path.isdir(MODELOS):
-    if MODELOS not in sys.path:
-        sys.path.insert(0, MODELOS)
-    try:
-        import pkp_modelo  # noqa: E402,F811
-    except ImportError:      # sin el arbol de herramientas no hay comparador
-        pkp_modelo = None
+import g1m  # noqa: E402
+import pkp_modelo  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +257,6 @@ def test_g1t_cabecera_y_offsets_relativos_a_la_tabla():
 # ---------------------------------------------------------------------------
 
 def test_comparar_estructura_localiza_el_cambio_en_la_tira():
-    if pkp_modelo is None:
-        pytest.skip("tools/modelos no esta (no viaja en la release)")
     a = _g1m((0, 1, 2, 2, 3, 0))
     b = _g1m((0, 1, 2, 3, 0))          # una tira mas corta, mismos triangulos reales
     est = pkp_modelo.comparar_estructura(a, b)
@@ -277,8 +271,6 @@ def test_comparar_estructura_localiza_el_cambio_en_la_tira():
 
 
 def test_comparar_estructura_sin_cambios_no_reporta_nada():
-    if pkp_modelo is None:
-        pytest.skip("tools/modelos no esta (no viaja en la release)")
     a = _g1m((0, 1, 2))
     est = pkp_modelo.comparar_estructura(a, a)
     assert est["campos_distintos"] == []
@@ -287,8 +279,6 @@ def test_comparar_estructura_sin_cambios_no_reporta_nada():
 
 
 def test_comparar_dos_ficheros_iguales_da_malla_identica(tmp_path):
-    if pkp_modelo is None:
-        pytest.skip("tools/modelos no esta (no viaja en la release)")
     datos = _g1m((0, 1, 2, 2))
     pa = tmp_path / "a.g1m"
     pb = tmp_path / "b.g1m"
@@ -313,10 +303,8 @@ def test_diferencias_localiza_un_tramo():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("nombre", sorted(
-    f for f in (os.listdir(MODELOS) if os.path.isdir(MODELOS) else []) if f.endswith(".py")))
+    f for f in os.listdir(MODELOS) if f.endswith(".py")))
 def test_las_herramientas_de_modelos_no_llevan_rutas_de_esta_maquina(nombre):
-    if not os.path.isdir(MODELOS):
-        pytest.skip("tools/modelos no esta (no viaja en la release)")
     ruta = os.path.join(MODELOS, nombre)
     with open(ruta, encoding="utf-8") as fh:
         texto = fh.read()

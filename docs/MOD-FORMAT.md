@@ -60,6 +60,7 @@ House rule: **this document contains no game content**. Every example is express
 | `edits` | list | no* | Byte writes (§2). |
 | `text` | list | no* | Text writes (§3). |
 | `files` | list | no | `{"path", "sha256"}`; only the shape is checked today. |
+| `romfs` | list | no | Files the mod puts in the romfs (`path`, `file`, `why`, hashes, §11). This is what makes the mod installable with the overlay (`pkp mod install`). |
 
 \* A mod with neither `edits` nor `text` is valid but **does nothing** (`mod.empty` warning).
 
@@ -597,3 +598,59 @@ They have been noted in the architecture document as well:
 * Validation does not run the game: a mod can be valid under this contract and still not please the
   engine. The format guarantees what it guarantees: declared bytes, checked `expect` and a
   re-readable container.
+
+---
+
+## 11. `romfs[]` — installable files (overlay), added 2026-11-08
+
+`mod_format` **stays at 1**: `romfs[]` is optional and an older reader ignores it with an
+"unknown key" warning, so no data mod changes meaning. What it adds is the way to say "this mod also
+puts this file in the romfs", which is what turns a folder into a mod installable with
+`pkp mod install` (see `docs/MOD-OVERLAY.md`).
+
+```json
+"romfs": [
+  {
+    "path": "LD_C0_R.BIN",
+    "file": "payload/LD_C0_R.BIN",
+    "why": "container with texture #5879 replaced by an own G1T",
+    "size": 237186304,
+    "sha256": "f0c1…",
+    "original_sha256": "2ea7…"
+  }
+]
+```
+
+| Field | Type | Mandatory | What it means |
+|---|---|---|---|
+| `path` | string | **yes** | Path inside the romfs: relative, `/`-separated, no root, no `..`, no `:`/drive. |
+| `file` | string | **yes** | File inside the mod, same path rule. |
+| `why` | string | **yes** | Which romfs file you replace and why (same rule as `edits[]`). |
+| `size` | integer | no | Payload size. Filled by `pkp mod pack`; when present, `install` checks it. |
+| `sha256` | string | no | Payload sha256. Filled by `pack`; when present, `install` checks it. |
+| `original_sha256` | string \| null | no | sha256 of what the `RomFS.img` serves at `path`. `pack --img` computes it from the image; `null` = new path. It is what proves the original comes back after uninstall. |
+
+Rules enforced at load time (error, not warning):
+
+* two entries with the same `path` → error (`schema.romfs.path`);
+* `path`/`file` with `..`, a root, a backslash, `:` or an empty segment → error
+  (`romfs_path_problem`);
+* `sha256`/`original_sha256` that are not 64 lowercase hex chars → error;
+* a `file` that does not exist at pack or install time → I/O error with the path.
+
+A mod with `romfs[]` is **not** composable with `merge` (§4): `pkp mod merge` rejects it and points
+at installing both mods; the order of `DM_ROMFS_OVERLAY` decides which one wins, and
+`pkp mod status` says who wins and who is inert.
+
+---
+
+## 12. Limits that still hold (updated 2026-11-08)
+
+* Those of §10 still hold, with two nuances: files in `files[]` are still not installed (that is
+  what `romfs[]` is for), and `romfs[]` **does** change game files, but in the overlay folder: the
+  `RomFS.img` is never written by any command of the kit.
+* `install`/`uninstall` do not launch the game and do not verify inside the engine: they refuse to
+  operate while the runtime is running and they check the `sha256` of what the `img` serves.
+  Whether the engine loads the asset is the asset format's business (`docs/G1T-FORMAT.md`).
+* The `.pkmod` package is a deterministic ZIP; there is no signature and no game-version check
+  beyond the manifest's `game.container_md5` and each file's `original_sha256`.

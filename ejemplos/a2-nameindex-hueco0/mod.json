@@ -1,0 +1,32 @@
+{
+  "mod_format": 1,
+  "name": "a2-nameindex-hueco0",
+  "version": "0.1.0",
+  "authors": [
+    "worker (tarjeta t_5264ef63)"
+  ],
+  "description": "Vehiculo de la prueba A2 de docs/PRUEBAS-DE-EDU.md: cambia un u16 de la fila que el objeto del hueco 0 resuelve. Se expresa por tabla, fila y offset; sin contenido del juego.",
+  "game": {
+    "title": "pokopia",
+    "version": "2.0.1a",
+    "container_md5": {
+      "LD_C0_R.BIN": "358a672d506ce2b0399149ede64a6760",
+      "LI_C0_R.IDX": "7e056a097f28a62f002ad961a611edf8"
+    }
+  },
+  "requires": [],
+  "edits": [
+    {
+      "table": 983,
+      "row": 63,
+      "offset": 34,
+      "type": "u16",
+      "expect": "2281",
+      "value": "2282",
+      "why": "nameIndex de la fila 63 (la que resuelve el objeto del hueco 0 del save). El id de texto es nameIndex + 3 (docs/SPEC-NAMES.md 6.3): 2281 -> 2284 pasa a 2282 -> 2285, asi que el objeto del hueco 0 muestra el texto de la fila siguiente.",
+      "confidence": "verified"
+    }
+  ],
+  "text": [],
+  "files": []
+}

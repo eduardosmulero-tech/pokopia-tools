@@ -24,7 +24,7 @@ RUTA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 
 if not os.path.isfile(RUTA):
     pytest.skip(
-        "tools/ no viaja en la release: el buscador de hashes vive en tools/",
+        "tools/ no viaja en la release: hashes_en_binario no esta en este arbol",
         allow_module_level=True,
     )
 

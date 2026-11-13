@@ -6,11 +6,9 @@ your own machine or clock — the backup folder name, the undo commands, the new
 described rather than quoted.
 
 You need: **your own legally obtained game files** (the folder that contains `LD_C0_R.BIN` and
-`LI_C0_R.IDX`), and **Python 3.11**. Nothing else — no .NET, no compiler, no internet. The pixel
-commands (`pkp tex extract`, `pkp tex inject --png`) additionally want `numpy`, `imagecodecs` and
-`etcpak`; every other command runs on the standard library.
+`LI_C0_R.IDX`), and **Python 3.11**. Nothing else — no .NET, no compiler, no internet.
 
-> CLI output is in Spanish in version 0.4.0. The interface that matters is the numbers and the
+> CLI output is in Spanish in version 0.5.0. The interface that matters is the numbers and the
 > exit code (`0` ok, `1` invalid, `2` usage error); every term is translated in
 > [GLOSSARY.md](GLOSSARY.md).
 
@@ -170,81 +168,6 @@ is applied. Refusing beats guessing.
 
 ---
 
-## 8 · Look inside the archives (read-only, version 0.4.0)
-
-Next to the container there are 24 `.fdata` archives with the scenes, textures, animations and
-sound banks. Nothing here writes; it only walks headers and decompresses in memory.
-
-```bash
-python pkp.py fdata stat "$PKP_ROMFS"
-```
-
-Real output on the supported build, first lines:
-
-```
-ficheros  : 24 .fdata, 5063190412 B
-entradas  : 79710
-  tipo         type_ktid   entradas    comprim.  B sin comprimir
-  g1s          0x7bcd279f     26137       26137       8481193512
-  g1a          0x6fa91671     17457       17457        697681192
-  g1t          0xafbec60c     14412       14412       6296584324
-```
-
-From there, each format has its own reader:
-
-```bash
-# one texture to PNG, then back into a .g1t of the same size
-python pkp.py fdata extract --type g1t --out build/g1t "$PKP_ROMFS"
-python pkp.py tex list build/g1t/<name_hash>.g1t
-python pkp.py tex extract build/g1t/<name_hash>.g1t --out build/a.png
-python pkp.py tex inject  build/g1t/<name_hash>.g1t --png build/a.png --out build/b.g1t
-
-# animations: header, bones and a neutral round trip
-python pkp.py anim list "$PKP_ROMFS/motor_asset_re" --limit 5
-python pkp.py anim roundtrip <file.g1a>
-
-# sound banks: census, then one stream out
-python pkp.py fdata extract --type srsa --out build/srsa "$PKP_ROMFS"
-python pkp.py snd stat build/srsa
-```
-
-`snd stat` on the supported build must print, in Spanish:
-
-```
-bancos    : 403
-streams   : 19297 (18835 con datos dentro del banco)
-codecs    : {'ka1a': 18558, 'msadpcm': 277}
-```
-
-Your own audio goes in with the kit's encoder, chosen from the destination stream — MS ADPCM or
-`KA1A`, the transform codec that had no public encoder before this release:
-
-```bash
-# a 1 s 440 Hz mono WAV (any tool), then into stream 1 of a COPY of the bank
-python pkp.py snd import build/srsa/<name_hash>.srsa --stream 1 --wav build/tone.wav -o build/new.srsa
-```
-
-It prints the codec and frame it used and the round-trip SNR it measured on your own WAV, and it
-refuses a stereo file instead of mixing it down. On the supported build **18,835 of 18,835**
-internal streams accept it (398 of 403 banks); the 5 remaining banks hold only streams whose audio
-lives in an `.srst` the RomFS does not ship.
-
-Models are the one family with no `pkp` subcommand: the reader is a library API.
-
-```python
-from pokopia import g1m
-
-doc = g1m.parse_g1m(open("model.g1m", "rb").read())
-print(doc["version"], doc["problemas"])
-print(g1m.geometria(doc)["triangulos"])      # real triangles, degenerates counted apart
-```
-
-Formats and limits: [SPEC-FDATA.md](SPEC-FDATA.md), [SPEC-G1T.md](SPEC-G1T.md),
-[SPEC-G1M.md](SPEC-G1M.md), [SPEC-G1A.md](SPEC-G1A.md), [AUDIO.md](AUDIO.md),
-[AUDIO-KA1A.md](AUDIO-KA1A.md), [SPEC-TEXT.md](SPEC-TEXT.md).
-
----
-
 ## Troubleshooting
 
 | What you see | What it means | What to do |
@@ -266,10 +189,7 @@ Formats and limits: [SPEC-FDATA.md](SPEC-FDATA.md), [SPEC-G1T.md](SPEC-G1T.md),
 * **Saves.** `pkp save read/write` exists, works on save version 2.0.1 only, and is
   documented in [GLOSSARY.md](GLOSSARY.md#6--save-parameters). Read it before writing: a save is
   not a copy you can regenerate.
-* **Adding new content** to the container. Version 0.4.0 rewrites bytes and text in existing
+* **Adding new content** to the container. Version 0.5.0 rewrites bytes and text in existing
   tables; it does not create entries, and it does not create models.
-* **Writing `.fdata`.** Textures, animations and sound banks can be modified, but the result is a
-  standalone file: putting it back into its archive is not implemented, so nothing from that path
-  is known to load in the game yet.
 * **Installing** anything into the game. Applying a mod produces a container; what you do with
   it is outside this repository, which ships no game content and no installers.
